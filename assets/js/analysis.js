@@ -268,3 +268,133 @@ export function buildMeta(itemsResponse) {
 function pct(x) {
   return `${Math.round(x * 100)}%`;
 }
+
+// ---- craft flips ----------------------------------------------------------
+// recipesData: { recipes: { OUT_ID: [{ in: { ID: qty }, out: count }] }, reqs: { OUT_ID: "Requires: ..." } }
+// Two ways to run each craft:
+//   patient: buy orders on every ingredient -> sell offer on the output (most profit, slower)
+//   instant: insta-buy ingredients -> insta-sell output (no waiting, rarely profitable)
+export function analyzeCrafts(bazaar, recipesData, settings = DEFAULT_SETTINGS, metaById = {}) {
+  const { budget, tax, capture } = { ...DEFAULT_SETTINGS, ...settings };
+  const P = bazaar.products || {};
+  const top = (id) => {
+    const p = P[id];
+    const bid = p?.sell_summary?.[0]?.pricePerUnit;
+    const ask = p?.buy_summary?.[0]?.pricePerUnit;
+    const q = p?.quick_status || {};
+    return { bid, ask, instaSellsHr: (q.sellMovingWeek || 0) / HOURS_PER_WEEK, instaBuysHr: (q.buyMovingWeek || 0) / HOURS_PER_WEEK };
+  };
+  const out = [];
+  for (const [id, recipes] of Object.entries(recipesData?.recipes || {})) {
+    const o = top(id);
+    if (!o.bid || !o.ask) continue;
+    let best = null;
+    for (const rec of recipes) {
+      let patientCost = 0, instantCost = 0, ingredientCrafts = Infinity, ok = true;
+      const inputs = [];
+      for (const [ing, qty] of Object.entries(rec.in)) {
+        const t = top(ing);
+        if (!t.bid || !t.ask) { ok = false; break; }
+        const orderPrice = round1(t.bid + TICK);
+        patientCost += orderPrice * qty;
+        instantCost += t.ask * qty;
+        ingredientCrafts = Math.min(ingredientCrafts, t.instaSellsHr / qty);
+        inputs.push({ id: ing, name: metaById[ing]?.name || prettyId(ing), qty, orderPrice, ask: t.ask, instaSellsHr: t.instaSellsHr });
+      }
+      if (!ok) continue;
+      const n = rec.out || 1;
+      const sellAt = round1(o.ask - TICK);
+      const patientRevenue = sellAt * (1 - tax) * n;
+      const instantRevenue = o.bid * (1 - tax) * n;
+      const profit = patientRevenue - patientCost;
+      const instantProfit = instantRevenue - instantCost;
+      const marketCraftsHr = Math.min(o.instaBuysHr / n, ingredientCrafts);
+      const affordable = Math.floor(budget / patientCost);
+      const craftsHr = Math.min(marketCraftsHr * capture, affordable);
+      const r = {
+        id, kind: "craft",
+        name: metaById[id]?.name || prettyId(id),
+        category: metaById[id]?.category || categoryOf(id),
+        tier: metaById[id]?.tier || null,
+        count: n, inputs, sellAt, bestBid: o.bid, bestAsk: o.ask,
+        cost: patientCost, instantCost, revenue: patientRevenue, instantRevenue,
+        margin: profit, marginPct: profit / patientCost,
+        instantProfit, instantPct: instantProfit / instantCost,
+        marketCraftsHr, craftsHr, affordable,
+        profitHr: Math.max(0, profit) * craftsHr,
+        instantProfitHr: Math.max(0, instantProfit) * Math.min(marketCraftsHr, o.instaSellsHr / n) * capture,
+        req: recipesData.reqs?.[id] || null,
+        outputFlowHr: o.instaBuysHr,
+      };
+      if (!best || r.profitHr > best.profitHr || (r.profitHr === best.profitHr && r.margin > best.margin)) best = r;
+    }
+    if (!best) continue;
+    const flags = [];
+    if (best.instantProfit > 0) flags.push({ key: "instant", level: "good", label: "Instant profit", tip: "Profitable even when you insta-buy every ingredient and insta-sell the result. No waiting on orders." });
+    if (o.ask / o.bid > 4) flags.push({ key: "wide", level: "bad", label: "Dead spread", tip: "The result's ask is over 4x its bid, so the sell price is not reliable." });
+    else if (best.marginPct > 1) flags.push({ key: "fat", level: "warn", label: "Suspicious margin", tip: "Over 100% profit per craft usually means lowball ingredient buy orders that will not fill quickly. Check the ingredient order books." });
+    if (best.marketCraftsHr < 1) flags.push({ key: "dead", level: "bad", label: "Illiquid", tip: "Less than one craft's worth trades per hour." });
+    if (best.req) flags.push({ key: "req", level: "info", label: best.req.replace(/^Requires:?\s*/i, "Needs "), tip: `${best.req}. You must unlock this recipe first.` });
+    best.flags = flags;
+    best.risky = flags.some((f) => f.level === "bad");
+    best.confidence = clamp(Math.sqrt(best.marketCraftsHr / 10), 0.05, 1) * (best.marginPct > 1 ? clamp(1 / best.marginPct, 0.2, 1) : 1);
+    best.adjProfitHr = best.profitHr * best.confidence;
+    out.push(best);
+  }
+  const topAdj = Math.max(1, ...out.map((r) => r.adjProfitHr));
+  for (const r of out) r.score = Math.round(100 * Math.sqrt(r.adjProfitHr / topAdj));
+  return out;
+}
+
+// ---- flip planner ---------------------------------------------------------
+// Greedy portfolio: repeatedly take the flip with the highest risk-adjusted
+// coins/hour for the coins still available, sizing each order to what can
+// realistically fill in about an hour. Spreads money across items (maxShare)
+// as every flipping guide recommends.
+export function planFlips(results, { purse, slots = 7, maxShare = 0.35, capture = DEFAULT_SETTINGS.capture, minProfit = Math.max(10_000, purse * 0.001) } = {}) {
+  let left = purse;
+  const picks = [];
+  const pool = results.filter((r) => r.margin > 0 && !r.risky && r.flowHr > 0 && r.buyAt > 0);
+  const used = new Set();
+  while (picks.length < slots && left > 0) {
+    let best = null;
+    for (const r of pool) {
+      if (used.has(r.id)) continue;
+      const cap = Math.min(left, purse * maxShare);
+      const qty = Math.floor(Math.min(cap / r.buyAt, r.flowHr * capture, ORDER_CAP));
+      if (qty < 1 || qty * r.margin < minProfit) continue;
+      const value = qty * r.margin * r.confidence;
+      if (!best || value > best.value) best = { r, qty, value };
+    }
+    if (!best) break;
+    used.add(best.r.id);
+    const cost = best.qty * best.r.buyAt;
+    left -= cost;
+    picks.push({ ...best, cost, profit: best.qty * best.r.margin, hours: Math.max(best.r.buyFillHrs, best.r.sellFillHrs) * (best.qty / Math.max(best.r.orderQty, 1)) });
+  }
+  const invested = purse - left;
+  const profit = picks.reduce((a, p) => a + p.profit, 0);
+  return { picks, invested, left, profit, roi: invested ? profit / invested : 0 };
+}
+
+// ---- mayor effects ----------------------------------------------------------
+// Reads /v2/resources/skyblock/election and reports anything that changes
+// bazaar taxes. Derpy's "QUAD TAXES!!!" quadruples them; other perks that
+// mention bazaar tax are surfaced so the user can see them.
+export function mayorEffects(election) {
+  const mayor = election?.mayor;
+  if (!mayor) return { taxMult: 1, mayor: null, minister: null, notes: [] };
+  const perks = [...(mayor.perks || []).map((p) => ({ ...p, who: mayor.name })), ...(mayor.minister?.perk ? [{ ...mayor.minister.perk, who: mayor.minister.name }] : [])];
+  let taxMult = 1;
+  const notes = [];
+  for (const p of perks) {
+    const desc = (p.description || "").replace(/§./g, "");
+    if (/quad\s*tax/i.test(p.name || "")) {
+      taxMult = 4;
+      notes.push({ who: p.who, name: p.name, text: desc, applied: true });
+    } else if (/tax/i.test(desc) && /bazaar/i.test(desc)) {
+      notes.push({ who: p.who, name: p.name, text: desc, applied: false });
+    }
+  }
+  return { taxMult, mayor: mayor.name, minister: mayor.minister?.name || null, notes };
+}

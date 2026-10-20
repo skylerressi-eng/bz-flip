@@ -7,6 +7,7 @@
   "scripts": {
     "start": "python3 -m http.server 8080",
     "test": "node --test tests/*.test.mjs",
-    "snapshot": "node scripts/snapshot.mjs --out data"
+    "data": "node scripts/snapshot.mjs --out data && node scripts/recipes.mjs --out data",
+    "recipes": "node scripts/recipes.mjs --out assets/data --max-age-hours 0"
   }
 }

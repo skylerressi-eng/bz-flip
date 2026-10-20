@@ -69,3 +69,13 @@ export function renderPriceChart(box, series) {
   svg.addEventListener("pointermove", show);
   svg.addEventListener("pointerleave", hide);
 }
+
+// Inline sparkline for table rows: green when the latest value is up on the first.
+export function sparkline(values, w = 72, h = 24) {
+  const lo = Math.min(...values), hi = Math.max(...values);
+  const span = hi - lo || 1;
+  const pts = values.map((v, i) => `${((i / (values.length - 1)) * (w - 2) + 1).toFixed(1)},${(h - 2 - ((v - lo) / span) * (h - 4)).toFixed(1)}`);
+  const up = values[values.length - 1] >= values[0];
+  const change = values[0] ? (values[values.length - 1] - values[0]) / values[0] : 0;
+  return `<svg class="spark ${up ? "up" : "down"}" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="24h ${up ? "up" : "down"} ${Math.abs(change * 100).toFixed(1)}%"><polyline points="${pts.join(" ")}"/></svg>`;
+}
