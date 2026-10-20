@@ -14,6 +14,7 @@ A fast, dependency-free website that scans **every product and craft on the Hypi
 - **7-day history check:** the top items are compared against Coflnet's 7-day price history, so temporary or manipulated margins are discounted and steady ones are marked ✓.
 - **Risk flags:** dead/lowball spreads, illiquid items, one-sided markets, crowded order books, price spikes against recent history (manipulation), and NPC price floors.
 - **Item panel:** step-by-step flip instructions with copy buttons (including the `/bz` command), fill-time estimates, the craft recipe, a price-history chart, and the top 10 levels of the order book.
+- **My flips tracker:** log the orders you placed (one click from any item, or “Track all” from the planner). Every refresh checks the live order book and tells you when you've been **outbid or undercut**, with the exact relist price (and a warning when relisting would go below break-even). It sends a browser notification, shows ⚠ in the tab title, and keeps your real profit for the last 24h and all time.
 - **Watchlist alerts:** get a notification when a starred item's margin reaches your target.
 - 7-day sparklines, break-even and dump-loss prices, rank movement, real item icons, search, category filter, sortable columns, keyboard shortcuts (`/`, `R`, `1`–`7`, `Esc`), light/dark themes, and a mobile layout.
 
@@ -68,6 +69,7 @@ assets/css/styles.css      styles (dark and light themes)
 assets/js/analysis.js      flip + craft math, flags, rankings, planner, mayor effects
 assets/js/history.js       compact hourly price history
 assets/js/app.js           UI, auto-refresh, drawer
+assets/js/tracker.js       “My flips” outbid/undercut checks and profit totals
 assets/js/chart.js         SVG price chart
 assets/js/format.js        number formatting
 scripts/snapshot.mjs       hourly price snapshot job

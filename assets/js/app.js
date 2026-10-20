@@ -2,6 +2,7 @@ import { analyzeAll, analyzeCrafts, planFlips, mayorEffects, rank, buildMeta, RA
 import { appendSnapshot, mergedSeries, isHistory, trim, EMPTY_HISTORY } from "./history.js";
 import * as f from "./format.js";
 import { renderPriceChart, sparkline } from "./chart.js";
+import { newEntry, trackStatus, trackerTotals, profitOf } from "./tracker.js";
 
 const API = "https://api.hypixel.net/v2";
 const ICON = (id) => `https://sky.coflnet.com/static/icon/${encodeURIComponent(id)}`;
@@ -18,6 +19,7 @@ const LS = {
   meta: "bzflip.meta.v1",
   history: "bzflip.history.v1",
   theme: "bzflip.theme",
+  tracker: "bzflip.tracker",
 };
 // order slots per Bazaar Flipper level (the tax rate identifies the level)
 const ORDER_SLOTS = { 0.0125: 14, 0.01125: 21, 0.01: 28 };
@@ -48,6 +50,9 @@ const state = {
   settings: loadSettings(),
   view: { tab: "best", category: "", hideRisky: true, sort: null, ...store.get(LS.view, {}) },
   watch: new Set(store.get(LS.watch, [])),
+  tracker: store.get(LS.tracker, []),
+  trackerSeen: new Map(), // entry key -> last status key, to notify only on change
+  showHistory: false,
   search: "",
   limit: PAGE,
   bazaar: null,
@@ -233,6 +238,7 @@ async function refresh({ manual = false } = {}) {
     if (!first) announceChanges(manual);
     ensureRefs(refCandidates());
     checkAlerts();
+    checkTracker();
     setTimeout(() => state.prevPrices.clear(), 4000); // price flashes are one-shot
     state.nextAt = state.fetchedAt + state.settings.interval * 1000;
     state.loading = false;
@@ -454,6 +460,7 @@ function renderAll() {
   renderMayor();
   renderKpis();
   renderPlanner();
+  renderTracker();
   renderTable();
   renderHistoryInfo();
   updateTitle();
@@ -588,7 +595,112 @@ function renderHistoryInfo() {
 
 function updateTitle() {
   const b = rank(state.results, "best", effectiveSettings())[0];
-  document.title = b ? `${f.coins(b.profitHr)}/hr · ${b.name} | BZ Flip` : "BZ Flip · Hypixel SkyBlock Bazaar Flipper";
+  const alerts = state.tracker.filter((e) => e.stage !== "done" && trackStatus(e, state.byId.get(e.id)).level === "bad").length;
+  const base = b ? `${f.coins(b.profitHr)}/hr · ${b.name} | BZ Flip` : "BZ Flip · Hypixel SkyBlock Bazaar Flipper";
+  document.title = alerts ? `⚠ ${alerts} to relist · ${base}` : base;
+}
+
+// ---------- my flips ----------
+function saveTracker() {
+  store.set(LS.tracker, state.tracker);
+  renderTracker();
+  updateTitle();
+}
+
+function trackItem(r, qty) {
+  if (!r || qty < 1) return;
+  state.tracker.unshift(newEntry(r, { qty, tax: effectiveSettings().tax }));
+  state.trackerSeen.delete(state.tracker[0].key);
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+}
+
+function checkTracker() {
+  for (const e of state.tracker) {
+    if (e.stage === "done") continue;
+    const st = trackStatus(e, state.byId.get(e.id));
+    const prev = state.trackerSeen.get(e.key);
+    state.trackerSeen.set(e.key, st.key);
+    if (prev && prev !== st.key && st.level === "bad") {
+      const body = `${e.name}: ${st.text}`;
+      toast(`⚠ ${body}`);
+      try {
+        if ("Notification" in window && Notification.permission === "granted") new Notification("BZ Flip: relist needed", { body, tag: `bzflip-track-${e.key}` });
+      } catch { /* notifications unavailable */ }
+    }
+  }
+}
+
+function renderTracker() {
+  const body = $("#tracker-body");
+  const t = trackerTotals(state.tracker);
+  const signed = (v) => `<b class="${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : "−"}${f.coins(Math.abs(v))}</b>`;
+  $("#tracker-totals").innerHTML = state.tracker.length
+    ? `<div><span class="label">Profit 24h</span>${signed(t.realized24)}</div><div><span class="label">All time</span>${signed(t.realized)}<small>${t.flips} flip${t.flips === 1 ? "" : "s"}</small></div><div><span class="label">Open</span><b>${t.open}</b><small>${f.coins(t.inOrders + t.inItems)} in play</small></div><div><span class="label">Expected</span>${signed(t.expected)}</div>`
+    : "";
+  if (!state.tracker.length) {
+    body.innerHTML = `<div class="empty">Nothing tracked yet. Open any item and press <b>Track this flip</b> after placing your buy order, or use <b>Track all</b> on the planner.</div>`;
+    return;
+  }
+  const open = state.tracker.filter((e) => e.stage !== "done");
+  const done = state.tracker.filter((e) => e.stage === "done");
+  const row = (e) => {
+    const r = state.byId.get(e.id);
+    const st = trackStatus(e, r);
+    const stage = { buying: "Buying", selling: "Selling", done: "Sold" }[e.stage];
+    const actions = [
+      st.price ? `<button class="copy" data-copy="${st.price.toFixed(1)}">copy ${f.price(st.price)}</button><button class="btn sm" data-act="reprice" data-key="${e.key}">I relisted at ${f.price(st.price)}</button>` : "",
+      e.stage === "buying" ? `<button class="btn sm primary" data-act="filled" data-key="${e.key}">Buy filled ✓</button>` : "",
+      e.stage === "selling" ? `<button class="btn sm primary" data-act="sold" data-key="${e.key}">Sold ✓</button>` : "",
+      e.stage !== "done" ? `<button class="btn sm" data-act="edit" data-key="${e.key}" title="Edit quantity and prices">Edit</button>` : "",
+      `<button class="btn sm ghost" data-act="remove" data-key="${e.key}" title="Remove">✕</button>`,
+    ].join("");
+    const prices = e.stage === "done"
+      ? `${f.int(e.qty)} × ${f.price(e.buyPrice)} → ${f.price(e.soldPrice)}`
+      : `${f.int(e.qty)} × buy ${f.price(e.buyPrice)} → sell ${f.price(e.sellPrice)}`;
+    return `<div class="trk ${st.level}">
+      <button class="trk-item" data-open-item="${e.id}">${icon(r || { id: e.id, name: e.name, category: "" }, "sm")}<span><b>${f.esc(e.name)}</b><small>${prices}</small></span></button>
+      <span class="trk-stage ${e.stage}">${stage}</span>
+      <div class="trk-status">${f.esc(st.text)}</div>
+      <div class="trk-actions">${actions}</div>
+    </div>`;
+  };
+  body.innerHTML = open.map(row).join("")
+    + (done.length ? `<button class="trk-history" data-act="history">${state.showHistory ? "Hide" : "Show"} ${done.length} finished flip${done.length > 1 ? "s" : ""}</button>` : "")
+    + (state.showHistory ? done.slice(0, 50).map(row).join("") : "");
+}
+
+function trackerAction(btn) {
+  const act = btn.dataset.act;
+  if (act === "history") { state.showHistory = !state.showHistory; return renderTracker(); }
+  const e = state.tracker.find((x) => x.key === btn.dataset.key);
+  if (!e) return;
+  const r = state.byId.get(e.id);
+  if (act === "reprice") {
+    const st = trackStatus(e, r);
+    if (st.price && st.field) e[st.field] = st.price;
+    toast(`Updated ${e.name} to ${f.price(st.price)}`);
+  } else if (act === "filled") {
+    e.stage = "selling";
+    e.filledAt = Date.now();
+    if (r && r.sellAt * (1 - e.tax) > e.buyPrice) e.sellPrice = r.sellAt; // list at today's best price
+    copy(e.sellPrice.toFixed(1));
+  } else if (act === "sold") {
+    e.stage = "done";
+    e.soldAt = Date.now();
+    e.soldPrice = e.sellPrice;
+    toast(`${e.name}: ${profitOf(e) >= 0 ? "+" : "−"}${f.coins(Math.abs(profitOf(e)))} profit`);
+  } else if (act === "edit") {
+    const answer = prompt(`${e.name}\nQuantity, buy price, sell price:`, `${e.qty}, ${e.buyPrice}, ${e.sellPrice}`);
+    if (answer == null) return;
+    const [qty, buy, sell] = answer.split(",").map((x) => f.parseCoins(x));
+    if (!(qty >= 1 && buy > 0 && sell > 0)) return toast("Enter three numbers, like: 64, 1250.5, 1399.9");
+    Object.assign(e, { qty: Math.round(qty), buyPrice: buy, sellPrice: sell });
+  } else if (act === "remove") {
+    if (!confirm(`Stop tracking ${e.name}?`)) return;
+    state.tracker = state.tracker.filter((x) => x !== e);
+  }
+  state.trackerSeen.delete(e.key);
+  saveTracker();
 }
 
 // ---------- drawer ----------
@@ -668,7 +780,8 @@ function openDrawer(id, { keepScroll = false } = {}) {
       </div>
     </div>
 
-    <div class="d-section"><h3>How to flip it <span>budget ${f.coins(s.budget)}</span></h3>${steps}</div>
+    <div class="d-section"><h3>How to flip it <span>budget ${f.coins(s.budget)}</span></h3>${steps}
+      ${qty > 0 ? `<button class="btn btn-primary track-btn" data-track="${id}">Track this flip</button><div class="d-note">Press it after placing the buy order. “My flips” then warns you when you're outbid or undercut.</div>` : ""}</div>
     ${craft ? craftSection(craft) : ""}
 
     <div class="d-section"><h3>Price history <span>${trend}</span></h3><div class="chart-box" id="chart"></div></div>
@@ -826,7 +939,28 @@ function bind() {
     const s = e.target.closest("[data-star]");
     if (s) return toggleWatch(s.dataset.star);
     const g = e.target.closest("[data-goto]");
-    if (g && state.byId.has(g.dataset.goto)) openDrawer(g.dataset.goto);
+    if (g && state.byId.has(g.dataset.goto)) return openDrawer(g.dataset.goto);
+    const t = e.target.closest("[data-track]");
+    if (t) {
+      const r = state.byId.get(t.dataset.track);
+      trackItem(r, r.orderQty);
+      saveTracker();
+      toast(`Tracking ${r.name}: ${f.int(r.orderQty)} @ ${f.price(r.buyAt)}`);
+    }
+  });
+  $("#tracker-body").addEventListener("click", (e) => {
+    const c = e.target.closest("[data-copy]");
+    if (c) return copy(c.dataset.copy);
+    const o = e.target.closest("[data-open-item]");
+    if (o) return openDrawer(o.dataset.openItem);
+    const b = e.target.closest("[data-act]");
+    if (b) trackerAction(b);
+  });
+  $("#plan-track").addEventListener("click", () => {
+    const picks = state.plan?.picks || [];
+    for (const p of [...picks].reverse()) trackItem(p.r, p.qty);
+    saveTracker();
+    if (picks.length) { toast(`Tracking ${picks.length} flips from the plan`); $("#tracker").scrollIntoView({ behavior: "smooth", block: "start" }); }
   });
   $("#backdrop").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => {

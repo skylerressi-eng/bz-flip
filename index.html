@@ -128,9 +128,21 @@
           <label class="field compact"><span>Flips at once</span><input id="plan-slots" type="number" min="1" max="28" step="1" /></label>
           <label class="field compact"><span>Max per item</span><select id="plan-share"><option value="0.2">20%</option><option value="0.25">25%</option><option value="0.35">35%</option><option value="0.5">50%</option><option value="1">100%</option></select></label>
           <button class="btn" id="plan-copy" type="button" title="Copy the plan as text">Copy plan</button>
+          <button class="btn" id="plan-track" type="button" title="Add every flip in this plan to My flips">Track all</button>
         </div>
       </div>
       <div id="plan-body"><div class="loading"><span class="spinner"></span> Building your plan…</div></div>
+    </section>
+
+    <section class="tracker card" id="tracker">
+      <div class="planner-head">
+        <div>
+          <h2>My flips</h2>
+          <p class="muted">Track the orders you've placed. Every refresh checks whether you've been outbid or undercut and tells you the exact price to relist at.</p>
+        </div>
+        <div class="tracker-totals" id="tracker-totals"></div>
+      </div>
+      <div id="tracker-body"></div>
     </section>
 
     <section class="board card" id="board">
