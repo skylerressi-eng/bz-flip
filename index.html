@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BZ Flip · Hypixel SkyBlock Bazaar Flipper</title>
+  <meta name="description" content="Live Hypixel SkyBlock bazaar flip finder. Ranks every product by realistic profit per hour, margin, volume and risk, and rechecks automatically." />
+  <meta name="theme-color" content="#0d1117" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23f5c542'/><circle cx='16' cy='16' r='10' fill='none' stroke='%23b8860b' stroke-width='2'/><text x='16' y='21' font-size='13' text-anchor='middle' font-family='Arial' font-weight='bold' fill='%238a6508'>$</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/css/styles.css" />
+  <script>
+    try { const t = localStorage.getItem("bzflip.theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="./" aria-label="BZ Flip home">
+        <span class="coin" aria-hidden="true"></span>
+        <span class="brand-text">BZ<span>Flip</span></span>
+      </a>
+      <div class="status" id="status" aria-live="polite">
+        <span class="dot"></span><span id="status-text">Connecting to the bazaar…</span>
+      </div>
+      <div class="topbar-actions">
+        <div class="countdown" title="Time until the next automatic recheck">
+          <svg viewBox="0 0 36 36" class="ring" aria-hidden="true"><circle cx="18" cy="18" r="15" /><circle cx="18" cy="18" r="15" id="ring-progress" /></svg>
+          <span id="countdown">--:--</span>
+        </div>
+        <button class="btn btn-primary" id="refresh-btn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
+          <span>Refresh</span>
+        </button>
+        <button class="btn btn-icon" id="settings-btn" type="button" aria-expanded="false" aria-controls="settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
+        </button>
+        <button class="btn btn-icon" id="theme-btn" type="button" title="Toggle light/dark">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" /></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <h1>Find the best bazaar flips, <em>live</em>.</h1>
+        <p class="lede">Every product on the Hypixel SkyBlock bazaar, ranked by what you can realistically make per hour. Margins are after tax, volumes come from 7-day trade data, and risky or manipulated items are flagged. It rechecks automatically.</p>
+      </div>
+    </section>
+
+    <section class="settings card" id="settings" hidden>
+      <div class="settings-grid">
+        <label class="field">
+          <span>Budget per item</span>
+          <div class="input-affix"><input id="set-budget" type="text" inputmode="decimal" autocomplete="off" /><em>coins</em></div>
+          <small>Coins you'll put into one flip. Accepts 5m, 250k, 1.5b.</small>
+        </label>
+        <label class="field">
+          <span>Bazaar tax</span>
+          <select id="set-tax">
+            <option value="0.0125">1.25% (default)</option>
+            <option value="0.01125">1.125% (Bazaar Flipper I)</option>
+            <option value="0.01">1% (Bazaar Flipper II)</option>
+          </select>
+          <small>Charged when your sell offer fills. Upgrade it in the Community Shop.</small>
+        </label>
+        <label class="field">
+          <span>Your share of volume <b id="capture-out"></b></span>
+          <input id="set-capture" type="range" min="1" max="50" step="1" />
+          <small>How much of each item's trading you'll win against other flippers. 5–15% is realistic.</small>
+        </label>
+        <label class="field">
+          <span>Min. volume / hour</span>
+          <input id="set-minflow" type="number" min="0" step="1" />
+          <small>Hide items that trade slower than this many units per hour.</small>
+        </label>
+        <label class="field">
+          <span>Auto recheck every</span>
+          <select id="set-interval">
+            <option value="60">1 minute</option>
+            <option value="300">5 minutes</option>
+            <option value="900">15 minutes</option>
+            <option value="1800">30 minutes</option>
+            <option value="3600">1 hour</option>
+          </select>
+          <small>The API refreshes about once a minute.</small>
+        </label>
+        <div class="field">
+          <span>Data</span>
+          <button class="btn" id="reset-btn" type="button">Reset settings</button>
+          <small id="history-info">Price history: none yet.</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="kpis" id="kpis" aria-label="Market summary">
+      <div class="kpi card skeleton"></div><div class="kpi card skeleton"></div><div class="kpi card skeleton"></div><div class="kpi card skeleton"></div>
+    </section>
+
+    <section class="board card">
+      <div class="board-head">
+        <nav class="tabs" id="tabs" role="tablist" aria-label="Rankings"></nav>
+        <div class="filters">
+          <label class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+            <input id="search" type="search" placeholder="Search items…  ( / )" autocomplete="off" />
+          </label>
+          <select id="category" aria-label="Category"><option value="">All categories</option></select>
+          <label class="toggle" title="Hide items flagged as dead, illiquid or spiking">
+            <input type="checkbox" id="hide-risky" checked /><span class="track"><span class="thumb"></span></span><span>Hide risky</span>
+          </label>
+        </div>
+      </div>
+      <p class="blurb" id="blurb"></p>
+
+      <div class="table-wrap">
+        <table class="flips" id="flips">
+          <thead>
+            <tr>
+              <th class="c-rank">#</th>
+              <th class="c-item">Item</th>
+              <th class="num sortable" data-sort="buyAt" title="Place your buy order at this price (best bid + 0.1)">Buy order</th>
+              <th class="num sortable" data-sort="sellAt" title="List your sell offer at this price (best ask − 0.1)">Sell offer</th>
+              <th class="num sortable" data-sort="margin" title="Profit per item after tax">Margin</th>
+              <th class="num sortable" data-sort="flowHr" title="Units per hour that can be bought and sold, the smaller of the two sides (7-day average)">Volume/hr</th>
+              <th class="num sortable" data-sort="competition" title="Orders on the book relative to volume. Higher means more undercutting.">Competition</th>
+              <th class="num sortable" data-sort="profitHr" title="Estimated coins/hour for your budget and volume share">Profit/hr</th>
+              <th class="num sortable" data-sort="score" title="0–100. Risk-adjusted profit/hr relative to the best flip right now.">Score</th>
+              <th class="c-star"><span class="sr-only">Watch</span></th>
+            </tr>
+          </thead>
+          <tbody id="rows">
+            <tr><td colspan="10"><div class="loading"><span class="spinner"></span> Scanning the bazaar…</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="board-foot">
+        <span id="count"></span>
+        <button class="btn" id="more-btn" type="button" hidden>Show more</button>
+      </div>
+    </section>
+
+    <section class="method card">
+      <details>
+        <summary><h2>How the ranking works</h2></summary>
+        <div class="method-grid">
+          <div>
+            <h3>The flip</h3>
+            <p>Put in a <b>buy order</b> one tick (0.1) above the best buy order. When it fills, list a <b>sell offer</b> one tick below the cheapest sell offer. <b>Margin</b> = sell price × (1 − tax) − buy price. Bazaar tax is only charged when you sell.</p>
+          </div>
+          <div>
+            <h3>Volume</h3>
+            <p>Your buy order fills when players <i>instant-sell</i>, and your sell offer fills when they <i>instant-buy</i>. We take the 7-day totals of both, divide by 168 hours, and use the <b>smaller</b> side, because a flip is only as fast as its slower leg.</p>
+          </div>
+          <div>
+            <h3>Profit / hour</h3>
+            <p>Units/hr = min(volume × your share, what your budget buys, the 71,680-item order cap). Profit/hr = units/hr × margin. <b>Margin × volume</b> shows the whole market's profit, ignoring your budget.</p>
+          </div>
+          <div>
+            <h3>Score &amp; confidence</h3>
+            <p>Profit/hr is multiplied by a confidence factor built from liquidity, how believable the spread is (50%+ margins get penalized), competition (orders per unit of volume), buy/sell balance, and stability against the recorded price history. The best flip right now scores 100.</p>
+          </div>
+          <div>
+            <h3>Flags</h3>
+            <p><span class="flag bad">Dead spread</span> the ask is over 4× the bid. <span class="flag bad">Illiquid</span> fewer than 1 unit trades per hour. <span class="flag bad">Price spike</span> the ask is 30%+ above its recent median, a classic manipulation pattern. <span class="flag warn">One-sided</span> the price is trending. <span class="flag good">NPC floor</span> an NPC buys it for about your buy price, so your downside is limited.</p>
+          </div>
+          <div>
+            <h3>Hourly recheck</h3>
+            <p>The page reloads bazaar data automatically (hourly by default; you can change it in settings). A GitHub Action also snapshots prices every hour into a rolling 4-day history, which powers the charts and spike detection. The bazaar API is public, so <b>no API key is needed</b>.</p>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="wrap footer">
+    <p>Data: <a href="https://api.hypixel.net/" target="_blank" rel="noopener">Hypixel Public API</a>. Not affiliated with Hypixel. Prices change by the second, so always check the in-game order book before committing coins.</p>
+  </footer>
+
+  <div class="drawer-backdrop" id="backdrop" hidden></div>
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="d-title" role="dialog">
+    <div class="drawer-inner" id="drawer-body"></div>
+  </aside>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="assets/js/app.js"></script>
+</body>
+</html>
