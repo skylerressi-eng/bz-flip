@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeProduct, analyzeAll, analyzeCrafts, planFlips, mayorEffects, rank, prettyId, buildMeta, DEFAULT_SETTINGS } from "../assets/js/analysis.js";
+import { analyzeProduct, analyzeAll, analyzeCrafts, planFlips, mayorEffects, shareOf, rank, prettyId, buildMeta, DEFAULT_SETTINGS } from "../assets/js/analysis.js";
 import { appendSnapshot, seriesFor, mergedSeries, EMPTY_HISTORY } from "../assets/js/history.js";
 
 // bid = best buy order (sell_summary), ask = best sell offer (buy_summary)
@@ -35,17 +35,49 @@ test("volume is limited by the slower side of the flip", () => {
   near(r.flowHr, 10);
 });
 
-test("profit/hr respects volume share and budget", () => {
+test("profit/hr = profit per cycle / (buy fill + sell fill + overhead)", () => {
   const s = { ...DEFAULT_SETTINGS, capture: 0.1, budget: 1e9 };
-  const r = analyzeProduct("X", product({ instaSellWeek: 168000, instaBuyWeek: 168000 }), s); // 1000/hr
-  near(r.unitsHr, 100);
-  near(r.profitHr, r.margin * 100);
+  const r = analyzeProduct("X", product({ instaSellWeek: 168000, instaBuyWeek: 168000 }), s); // 1000/hr each side
+  near(r.buyRate, 100);
+  near(r.sellRate, 100);
+  assert.equal(r.orderQty, 200); // sized to ~2h of buy fills
+  near(r.cycleHrs, 2 + 2 + 0.1);
+  near(r.profitHr, (r.margin * 200) / 4.1);
+  // small budget: tiny order, fast cycle, still bounded by fill speed
   const poor = analyzeProduct("X", product({ instaSellWeek: 168000, instaBuyWeek: 168000 }), { ...s, budget: 1001 });
   assert.equal(poor.orderQty, 10);
-  near(poor.unitsHr, 10);
+  near(poor.cycleHrs, 0.1 + 0.1 + 0.1);
+  near(poor.unitsHr, 10 / 0.3);
   const broke = analyzeProduct("X", product(), { ...s, budget: 50 });
   assert.equal(broke.orderQty, 0);
   assert.equal(broke.profitHr, 0);
+});
+
+test("auto volume share comes from competing orders at the top of the book", () => {
+  assert.equal(shareOf("auto", 0), 0.5);
+  near(shareOf("auto", 3), 0.25);
+  assert.equal(shareOf("auto", 1000), 0.03);
+  assert.equal(shareOf(0.2, 50), 0.2);
+  // fixture: both levels on each side are within 1% of the top -> 5 orders per side
+  const r = analyzeProduct("X", product(), DEFAULT_SETTINGS);
+  near(r.shareBuy, 1 / 6);
+  near(r.shareSell, 1 / 6);
+});
+
+test("history: steady vs above-normal margins", () => {
+  const now = Date.now();
+  const hist = Array.from({ length: 24 }, (_, i) => ({ t: now - (24 - i) * 3600e3, bid: 100, ask: 110 })); // ~8.5% typical
+  const steady = analyzeProduct("X", product({ bid: 100, ask: 110 }), DEFAULT_SETTINGS, {}, hist);
+  assert.ok(steady.verified);
+  assert.ok(steady.flags.some((f) => f.key === "steady"));
+  const wide = analyzeProduct("X", product({ bid: 100, ask: 128 }), DEFAULT_SETTINGS, {}, hist);
+  assert.ok(wide.flags.some((f) => f.key === "abnormal"));
+  assert.ok(wide.confidence < steady.confidence * 1.0001);
+  const never = analyzeProduct("X", product({ bid: 100, ask: 110 }), DEFAULT_SETTINGS, {}, hist.map((h) => ({ ...h, ask: 100.5 })));
+  assert.ok(never.flags.some((f) => f.key === "unusual"));
+  const unverified = analyzeProduct("X", product({ bid: 100, ask: 110 }), DEFAULT_SETTINGS);
+  assert.equal(unverified.verified, false);
+  assert.ok(unverified.confidence < steady.confidence);
 });
 
 test("one-sided books are skipped", () => {
@@ -121,7 +153,10 @@ test("craft flips: patient vs instant profit and volume limits", () => {
   near(c.margin, 1999.9 * (1 - 0.0125) - 160 * 10.1);
   near(c.instantProfit, 1700 * (1 - 0.0125) - 160 * 11);
   near(c.marketCraftsHr, 10); // ingredient side: 1600/160 = 10 < 20 output side
-  near(c.craftsHr, 5);
+  // 10 crafts: ingredients fill at 800/hr (2h), results sell at 10/hr (1h), plus overhead
+  assert.equal(c.crafts, 10);
+  near(c.cycleHrs, 2 + 1 + 0.2);
+  near(c.craftsHr, 10 / 3.2);
   assert.equal(c.req, "Requires: Ing IV");
 });
 

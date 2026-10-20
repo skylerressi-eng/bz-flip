@@ -10,10 +10,12 @@ A fast, dependency-free website that scans **every product and craft on the Hypi
 - **Flip planner:** enter your coins and it allocates them across the best flips. It sizes each order to about an hour of volume, caps how much goes into one item, and respects your order slots (14, 21 or 28 with Bazaar Flipper). One click copies the plan.
 - **Mayor-aware tax:** reads the live election API, applies Derpy's QUAD TAXES automatically, and shows any other perk that touches bazaar tax.
 - **Correct bazaar math:** buy order at best bid + 0.1, sell offer at best ask − 0.1, and sell tax of 1.25%, 1.125% or 1% (Bazaar Flipper I/II). Volume is the slower of the 7-day instant-buys and instant-sells.
+- **Accurate profit/hr:** coins are tied up until both the buy order and the sell offer fill, so profit/hr is profit per flip divided by the full cycle time. Your share of volume is estimated from how many competing orders sit at the top of the book.
+- **7-day history check:** the top items are compared against Coflnet's 7-day price history, so temporary or manipulated margins are discounted and steady ones are marked ✓.
 - **Risk flags:** dead/lowball spreads, illiquid items, one-sided markets, crowded order books, price spikes against recent history (manipulation), and NPC price floors.
 - **Item panel:** step-by-step flip instructions with copy buttons (including the `/bz` command), fill-time estimates, the craft recipe, a price-history chart, and the top 10 levels of the order book.
 - **Watchlist alerts:** get a notification when a starred item's margin reaches your target.
-- 24h sparklines, rank movement, real item icons, search, category filter, sortable columns, keyboard shortcuts (`/`, `R`, `1`–`7`, `Esc`), light/dark themes, and a mobile layout.
+- 7-day sparklines, break-even and dump-loss prices, rank movement, real item icons, search, category filter, sortable columns, keyboard shortcuts (`/`, `R`, `1`–`7`, `Esc`), light/dark themes, and a mobile layout.
 
 ## API key?
 
@@ -40,16 +42,21 @@ npm run recipes     # refresh the bundled fallback recipes in assets/data
 
 GitHub pauses scheduled workflows after 60 days with no repo activity. Re-enable it from the Actions tab if that happens.
 
-## How the score works
+## How the math works
 
 ```
-margin        = sellOffer × (1 − tax) − buyOrder
-volume/hr     = min(instaSellsWeek, instaBuysWeek) / 168
-units/hr      = min(volume/hr × yourShare, budget / buyOrder, 71,680)
-profit/hr     = margin × units/hr
-confidence    = liquidity × spreadSanity × (1 − competition/2) × buySellBalance × priceStability
+buyAt         = best buy order + 0.1          sellAt = best sell offer − 0.1
+margin        = sellAt × (1 − tax) − buyAt    (tax × 4 while Derpy is mayor)
+your share    = 1 / (competing orders within 1% of the top + 1)   ("Auto"; or a fixed %)
+buy fill rate = instant-sells/hr × share      sell fill rate = instant-buys/hr × share
+order size    = min(budget / buyAt, ~2h of buy fills, 71,680 items, 1B coins of sell offers)
+cycle time    = size / buy rate + size / sell rate + 6 min to claim & relist
+profit/hr     = margin × size / cycle time
+confidence    = liquidity × spread sanity × competition × buy/sell balance × price stability × 7-day normalcy
 score (0–100) = 100 × sqrt(profit/hr × confidence ÷ best in market)
 ```
+
+The top ~30 items are checked against 7-day history from [Coflnet](https://sky.coflnet.com). A margin far above the item's normal margin is flagged "Above normal" and discounted; one that matches is flagged "Steady margin" and gets a ✓.
 
 The analysis lives in `assets/js/analysis.js` (pure functions, shared with the tests).
 

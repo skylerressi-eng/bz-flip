@@ -26,7 +26,7 @@ export function renderPriceChart(box, series) {
   const hours = (t1 - t0) / 3600e3;
   const tfmt = (t) => {
     const d = new Date(t);
-    return hours > 36 ? d.toLocaleDateString([], { weekday: "short", hour: "numeric" }) : d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return hours > 36 ? d.toLocaleDateString([], { month: "short", day: "numeric" }) : d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   };
 
   box.innerHTML = `

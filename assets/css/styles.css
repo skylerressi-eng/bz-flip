@@ -242,6 +242,7 @@ table.flips { width: 100%; border-collapse: collapse; font-size: 14px; }
 .score .ring-s { --p: 0; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font: 700 12px var(--mono);
   background: radial-gradient(closest-side, var(--card) 76%, transparent 78%), conic-gradient(var(--sc) calc(var(--p) * 1%), var(--line) 0); }
 tr:hover .score .ring-s { background: radial-gradient(closest-side, var(--card-2) 76%, transparent 78%), conic-gradient(var(--sc) calc(var(--p) * 1%), var(--line) 0); }
+.verified { display: inline-grid; place-items: center; width: 16px; height: 16px; margin-left: -10px; margin-top: 20px; border-radius: 50%; background: var(--green); color: var(--bg); font-size: 10px; font-weight: 800; box-shadow: 0 0 0 2px var(--card); }
 .star { border: 0; background: none; cursor: pointer; color: var(--faint); font-size: 18px; padding: 4px; line-height: 1; }
 .star:hover { color: var(--gold); }
 .star.on { color: var(--gold); }
@@ -317,7 +318,7 @@ tr.flash { animation: flash 1.6s ease-out; }
 .price.tick-down { animation: tickDown 2.4s ease-out; border-radius: 4px; }
 @keyframes tickUp { 0%, 30% { background: var(--green-bg); color: var(--green); box-shadow: 0 0 0 3px var(--green-bg); } }
 @keyframes tickDown { 0%, 30% { background: var(--red-bg); color: var(--red); box-shadow: 0 0 0 3px var(--red-bg); } }
-.spark { display: inline-block; vertical-align: middle; overflow: visible; }
+.spark { display: inline-block; width: 72px; height: 24px; vertical-align: middle; overflow: visible; }
 .spark polyline { fill: none; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
 .spark.up polyline { stroke: var(--green); }
 .spark.down polyline { stroke: var(--red); }

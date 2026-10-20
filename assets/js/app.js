@@ -1,4 +1,4 @@
-import { analyzeAll, analyzeCrafts, planFlips, mayorEffects, rank, buildMeta, RANKINGS, DEFAULT_SETTINGS, historyStats } from "./analysis.js";
+import { analyzeAll, analyzeCrafts, planFlips, mayorEffects, rank, buildMeta, RANKINGS, DEFAULT_SETTINGS, TARGET_FILL_HRS, historyStats } from "./analysis.js";
 import { appendSnapshot, mergedSeries, isHistory, trim, EMPTY_HISTORY } from "./history.js";
 import * as f from "./format.js";
 import { renderPriceChart, sparkline } from "./chart.js";
@@ -6,7 +6,10 @@ import { renderPriceChart, sparkline } from "./chart.js";
 const API = "https://api.hypixel.net/v2";
 const ICON = (id) => `https://sky.coflnet.com/static/icon/${encodeURIComponent(id)}`;
 const PAGE = 50;
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
+const COFL = (id) => `https://sky.coflnet.com/api/bazaar/${encodeURIComponent(id)}/history/week`;
+const REF_TTL = 3600e3; // Coflnet caches week history for an hour
+const REF_TOP = 30; // how many top items get checked against 7-day history
 const STALE_MS = 3 * 60e3;
 const LS = {
   settings: "bzflip.settings",
@@ -34,7 +37,8 @@ const defaultSettings = () => ({ ...DEFAULT_SETTINGS, interval: 60, purse: 50_00
 function loadSettings() {
   const saved = store.get(LS.settings, {});
   const s = { ...defaultSettings(), ...saved };
-  if ((saved.v || 1) < SETTINGS_VERSION) s.interval = 60; // v1 defaulted to hourly; live is the new default
+  if ((saved.v || 1) < 2) s.interval = 60; // v1 defaulted to hourly; live is the new default
+  if ((saved.v || 1) < 3) s.capture = "auto"; // v3: volume share is estimated from the order book
   s.v = SETTINGS_VERSION;
   return s;
 }
@@ -52,6 +56,8 @@ const state = {
   mayor: mayorEffects(null),
   electionAt: 0,
   serverHistory: null,
+  refs: new Map(), // id -> { at, series } 7-day history from Coflnet
+  refsInflight: new Set(),
   localHistory: store.get(LS.history, null),
   results: [],
   crafts: [],
@@ -89,11 +95,11 @@ const BLURBS = {
 const $ = (sel, root = document) => root.querySelector(sel);
 
 // ---------- data loading ----------
-async function getJson(url, timeoutMs = 20000) {
+async function getJson(url, timeoutMs = 20000, cache = "no-store") {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctl.signal, cache: "no-store" });
+    const res = await fetch(url, { signal: ctl.signal, cache });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (err) {
@@ -148,7 +154,53 @@ function loadExtras() {
 }
 
 function seriesFor(id) {
-  return mergedSeries([state.serverHistory, state.localHistory].filter(Boolean), id);
+  const own = mergedSeries([state.serverHistory, state.localHistory].filter(Boolean), id);
+  const ref = state.refs.get(id)?.series;
+  if (!ref?.length) return own;
+  // Coflnet's 7-day points first, then our own snapshots wherever they add newer data
+  const out = [];
+  for (const p of [...ref, ...own].sort((a, b) => a.t - b.t)) if (!out.length || p.t - out[out.length - 1].t >= 20 * 60e3) out.push(p);
+  return out;
+}
+
+// Pull 7-day price history from Coflnet for the items people are most likely to
+// flip, so margins can be checked against what's normal for that item.
+async function ensureRefs(ids) {
+  const fresh = (id) => Date.now() - (state.refs.get(id)?.at || 0) < REF_TTL;
+  const need = [...new Set(ids)].filter((id) => !fresh(id) && !state.refsInflight.has(id)).slice(0, 40);
+  if (!need.length) return;
+  need.forEach((id) => state.refsInflight.add(id));
+  let added = 0;
+  const queue = [...need];
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    while (queue.length) {
+      const id = queue.shift();
+      try {
+        const raw = await getJson(COFL(id), 15000, "default");
+        const series = (Array.isArray(raw) ? raw : [])
+          .map((p) => ({ t: Date.parse(/Z|[+-]\d\d:?\d\d$/.test(p.timestamp) ? p.timestamp : `${p.timestamp}Z`), bid: p.sell, ask: p.buy }))
+          .filter((p) => p.t > 0 && p.bid > 0 && p.ask > 0)
+          .sort((a, b) => a.t - b.t);
+        state.refs.set(id, { at: Date.now(), series });
+        if (series.length) added++;
+      } catch {
+        state.refs.set(id, { at: Date.now(), series: [] }); // don't hammer a failing item
+      } finally {
+        state.refsInflight.delete(id);
+      }
+    }
+  }));
+  if (added) recomputeAndRender({ fetchRefs: false });
+}
+
+function refCandidates() {
+  const s = effectiveSettings();
+  return [
+    ...rank(state.results, "best", s).slice(0, REF_TOP).map((r) => r.id),
+    ...rank(state.results, "margin", s).slice(0, 10).map((r) => r.id),
+    ...(state.plan?.picks || []).map((p) => p.r.id),
+    ...state.watch,
+  ];
 }
 
 function recordLocalSnapshot() {
@@ -179,6 +231,7 @@ async function refresh({ manual = false } = {}) {
     compute();
     renderAll();
     if (!first) announceChanges(manual);
+    ensureRefs(refCandidates());
     checkAlerts();
     setTimeout(() => state.prevPrices.clear(), 4000); // price flashes are one-shot
     state.nextAt = state.fetchedAt + state.settings.interval * 1000;
@@ -215,13 +268,14 @@ function compute() {
   craftRows(state.view.hideRisky).slice(0, 200).forEach((r, i) => cm.set(r.id, i + 1));
   ranks.craft = cm;
   state.lastRanks = ranks;
-  state.plan = planFlips(rank(state.results, "best", s), { purse: state.settings.purse, slots: planSlots(), maxShare: state.settings.planShare, capture: s.capture });
+  state.plan = planFlips(rank(state.results, "best", s), { purse: state.settings.purse, slots: planSlots(), maxShare: state.settings.planShare });
 }
 
-function recomputeAndRender() {
+function recomputeAndRender({ fetchRefs = true } = {}) {
   if (!state.bazaar) return;
   compute();
   renderAll();
+  if (fetchRefs) ensureRefs(refCandidates());
 }
 
 function craftRows(hideRisky) {
@@ -292,9 +346,10 @@ function meter(v) {
   return `<span class="meter ${cls}" title="${Math.round(v * 100)}/100">${[1, 2, 3, 4, 5].map((i) => `<i class="${i <= on ? "on" : ""}"></i>`).join("")}</span>`;
 }
 
-function scoreRing(s) {
+function scoreRing(s, verified = false) {
   const color = s >= 70 ? "var(--green)" : s >= 40 ? "var(--gold)" : s >= 15 ? "var(--amber)" : "var(--faint)";
-  return `<span class="score"><span class="ring-s" style="--p:${s};--sc:${color}">${s}</span></span>`;
+  const check = verified ? `<span class="verified" title="Margin checked against this item's 7-day price history">✓</span>` : "";
+  return `<span class="score"><span class="ring-s" style="--p:${s};--sc:${color}">${s}</span>${check}</span>`;
 }
 
 const flagHtml = (fl) => `<span class="flag ${fl.level}" title="${f.esc(fl.tip)}">${f.esc(fl.label)}</span>`;
@@ -334,8 +389,8 @@ function volHtml(r) {
 }
 
 function sparkCell(id) {
-  const day = Date.now() - 24 * 3600e3;
-  const pts = seriesFor(id).filter((p) => p.t >= day);
+  const week = Date.now() - 7 * 24 * 3600e3;
+  const pts = seriesFor(id).filter((p) => p.t >= week);
   return pts.length >= 3 ? sparkline(pts.map((p) => p.ask)) : `<span class="muted">–</span>`;
 }
 
@@ -347,8 +402,8 @@ function ingredientsText(r) {
 const star = (r) => `<button class="star ${state.watch.has(r.id) ? "on" : ""}" data-star="${r.id}" aria-label="Watch ${f.esc(r.name)}" aria-pressed="${state.watch.has(r.id)}">${state.watch.has(r.id) ? "★" : "☆"}</button>`;
 const rankCol = { label: "#", cls: "c-rank", cell: (r, i) => `${i + 1}${rankDelta(r.id, i + 1)}` };
 const starCol = { label: "", cls: "c-star", cell: star };
-const sparkCol = { label: "24h", key: "trend24", num: true, cls: "c-spark", title: "Lowest sell offer over the last 24h", cell: (r) => sparkCell(r.id) };
-const scoreCol = { label: "Score", key: "score", num: true, cls: "c-score", title: "0–100: risk-adjusted profit/hr relative to the best one right now", cell: (r) => scoreRing(r.score) };
+const sparkCol = { label: "7d", key: "trend24", num: true, cls: "c-spark", title: "Lowest sell offer over the last 7 days (Coflnet history + our own snapshots)", cell: (r) => sparkCell(r.id) };
+const scoreCol = { label: "Score", key: "score", num: true, cls: "c-score", title: "0–100: risk-adjusted profit/hr relative to the best one right now. ✓ = margin checked against 7-day history.", cell: (r) => scoreRing(r.score, r.verified) };
 const buyCol = { label: "Buy order", key: "buyAt", num: true, title: "Place your buy order here (best bid + 0.1)", cell: (r) => `<span class="price${tickCls(r.id, "buyAt", r.buyAt)}">${f.price(r.buyAt)}</span><span class="price-sub">bid ${f.coins(r.bestBid)}</span>` };
 
 // Column sets per tab kind; `key` makes a column sortable.
@@ -358,11 +413,11 @@ const COLS = {
     { label: "Item", cls: "c-item", cell: (r) => itemCell(r) },
     buyCol,
     { label: "Sell offer", key: "sellAt", num: true, title: "List your sell offer here (best ask − 0.1)", cell: (r) => `<span class="price${tickCls(r.id, "sellAt", r.sellAt)}">${f.price(r.sellAt)}</span><span class="price-sub">ask ${f.coins(r.bestAsk)}</span>` },
-    { label: "Margin", key: "margin", num: true, title: "Profit per item after tax", cell: (r) => marginHtml(r.margin, r.marginPct) },
+    { label: "Margin", key: "margin", num: true, title: "Profit per item after tax. “typ” is the median margin over the last 7 days.", cell: (r) => marginHtml(r.margin, r.marginPct) + (r.typicalMarginPct != null ? `<span class="price-sub" title="Median margin over the last ${Math.round(r.history.spanHours)}h">typ ${f.pct(r.typicalMarginPct)}</span>` : "") },
     { label: "Volume/hr", key: "flowHr", num: true, title: "Units/hour that can be both bought and sold (slower side, 7-day average)", cell: volHtml },
     sparkCol,
     { label: "Competition", key: "competition", num: true, title: "Orders on the book relative to volume. Higher means more undercutting.", cell: (r) => `${meter(r.competition)}<span class="price-sub">${f.int(r.totalOrders)} orders</span>` },
-    { label: "Profit/hr", key: "profitHr", num: true, title: "Estimated coins/hour for your budget and volume share", cell: (r) => (r.orderQty === 0 ? `<span class="flag info">Over budget</span>` : `<span class="profit">${f.coins(r.profitHr)}</span>`) + `<span class="price-sub">${f.coins(r.marketProfitHr)} mkt</span>` },
+    { label: "Profit/hr", key: "profitHr", num: true, title: "Profit per flip ÷ time for the buy order and sell offer to fill (at your share of volume), plus 6 min to relist", cell: (r) => (r.affordable === 0 ? `<span class="flag info">Over budget</span>` : `<span class="profit">${f.coins(r.profitHr)}</span><span class="price-sub" title="Profit per flip and how long one flip takes">+${f.coins(r.profitPerOrder)} / ${f.duration(r.cycleHrs)}</span>`) },
     scoreCol,
     starCol,
   ],
@@ -386,7 +441,7 @@ const COLS = {
     { label: "Profit/craft", key: "margin", num: true, cell: (r) => marginHtml(r.margin, r.marginPct) },
     { label: "Crafts/hr", key: "marketCraftsHr", num: true, title: "Limited by both the result's buyers and each ingredient's sellers", cell: (r) => `<span class="price">${f.rate(r.marketCraftsHr)}</span>` },
     { label: "Instant", key: "instantProfit", num: true, title: "Insta-buy ingredients → insta-sell result", cell: (r) => `<span class="price ${r.instantProfit > 0 ? "pos" : "muted"}">${r.instantProfit > 0 ? "+" : ""}${f.coins(r.instantProfit)}</span>` },
-    { label: "Profit/hr", key: "profitHr", num: true, cell: (r) => (r.affordable === 0 ? `<span class="flag info">Over budget</span>` : `<span class="profit">${f.coins(r.profitHr)}</span>`) },
+    { label: "Profit/hr", key: "profitHr", num: true, title: "Profit per batch of crafts ÷ time for ingredients to fill and results to sell", cell: (r) => (r.affordable === 0 ? `<span class="flag info">Over budget</span>` : `<span class="profit">${f.coins(r.profitHr)}</span><span class="price-sub">${f.int(r.crafts)} crafts / ${f.duration(r.cycleHrs)}</span>`) },
     scoreCol,
     starCol,
   ],
@@ -502,24 +557,24 @@ function renderPlanner() {
       <td class="num" data-label="Buy order"><span class="price">${f.int(x.qty)} × ${f.price(r.buyAt)}</span></td>
       <td class="num" data-label="Cost"><span class="price">${f.coins(x.cost)}</span></td>
       <td class="num" data-label="Sell offer"><span class="price">${f.price(r.sellAt)}</span></td>
-      <td class="num" data-label="Profit"><span class="profit">+${f.coins(x.profit)}</span></td>
-      <td class="num" data-label="Fills"><span class="price">${f.duration(x.hours)}</span></td>
+      <td class="num" data-label="Profit"><span class="profit">+${f.coins(x.profit)}</span><span class="price-sub">${f.coins(x.profitHr)}/hr</span></td>
+      <td class="num" data-label="Cycle"><span class="price">${f.duration(x.hours)}</span></td>
     </tr>`;
   }).join("");
   $("#plan-body").innerHTML = `
     <div class="plan-summary">
       <div><span class="label">Invest</span><b>${f.coins(p.invested)}</b><small>of ${f.coins(state.settings.purse)}</small></div>
-      <div><span class="label">Expected profit / round</span><b class="pos">+${f.coins(p.profit)}</b><small>a round is about 1–2h</small></div>
-      <div><span class="label">Return</span><b>${f.pct(p.roi)}</b><small>per round, after tax</small></div>
+      <div><span class="label">Expected profit / hour</span><b class="pos">+${f.coins(p.profitHr)}</b><small>all flips running in parallel</small></div>
+      <div><span class="label">Profit per cycle</span><b>+${f.coins(p.profit)}</b><small>${f.pct(p.roi)} return, after tax</small></div>
       <div><span class="label">Order slots</span><b>${p.picks.length * 2} / ${ORDER_SLOTS[state.settings.tax] || 14}</b><small>buy + sell per flip</small></div>
     </div>
-    <div class="table-wrap"><table class="flips plan-table"><thead><tr><th class="c-rank">#</th><th>Item</th><th class="num">Buy order</th><th class="num">Cost</th><th class="num">Sell offer</th><th class="num">Profit</th><th class="num">Fills</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="table-wrap"><table class="flips plan-table"><thead><tr><th class="c-rank">#</th><th>Item</th><th class="num">Buy order</th><th class="num">Cost</th><th class="num">Sell offer</th><th class="num">Profit</th><th class="num">Cycle</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function planText() {
   const p = state.plan;
   if (!p?.picks.length) return "";
-  return [`BZ Flip plan (${new Date().toLocaleString()}): invest ${f.coins(p.invested)} → +${f.coins(p.profit)}`,
+  return [`BZ Flip plan (${new Date().toLocaleString()}): invest ${f.coins(p.invested)} → +${f.coins(p.profit)} per cycle, ~${f.coins(p.profitHr)}/hr`,
     ...p.picks.map((x, i) => `${i + 1}. ${x.r.name}: buy ${f.int(x.qty)} @ ${f.price(x.r.buyAt)}, sell @ ${f.price(x.r.sellAt)} → +${f.coins(x.profit)}`)].join("\n");
 }
 
@@ -559,7 +614,8 @@ function openDrawer(id, { keepScroll = false } = {}) {
   state.openId = id;
   const s = effectiveSettings();
   const series = seriesFor(id);
-  const hs = historyStats(series);
+  const hs = historyStats(series, { tax: s.tax });
+  if (!state.refs.has(id)) ensureRefs([id]).then(() => { if (state.openId === id) openDrawer(id, { keepScroll: true }); });
   const qty = r.orderQty;
   const craft = state.craftById.get(id);
   const npcLine = r.npcProfit > 0 && qty > 0
@@ -567,7 +623,7 @@ function openDrawer(id, { keepScroll = false } = {}) {
     : "";
   const steps = qty > 0
     ? `<div class="steps">
-        <div class="step">Create a <b>Buy Order</b> for <b class="mono">${f.int(qty)}</b> at <b class="mono">${f.price(r.buyAt)}</b> each <button class="copy" data-copy="${r.buyAt.toFixed(1)}">copy</button><br><span class="muted">Costs ${f.coins(qty * r.buyAt)} · fills in ${f.duration(r.buyFillHrs)} at your volume share</span></div>
+        <div class="step">Create a <b>Buy Order</b> for <b class="mono">${f.int(qty)}</b> at <b class="mono">${f.price(r.buyAt)}</b> each <button class="copy" data-copy="${r.buyAt.toFixed(1)}">copy</button> <button class="copy" data-copy="${qty}">qty</button><br><span class="muted">Costs ${f.coins(qty * r.buyAt)} · fills in ${f.duration(r.buyFillHrs)} at your volume share${qty < r.affordable ? ` · sized to ~${TARGET_FILL_HRS}h of volume, so you're not stuck holding a huge order` : ""}</span></div>
         <div class="step">When it fills, create a <b>Sell Offer</b> at <b class="mono">${f.price(r.sellAt)}</b> each <button class="copy" data-copy="${r.sellAt.toFixed(1)}">copy</button><br><span class="muted">Sells in ${f.duration(r.sellFillHrs)} · relist if you get undercut</span></div>
         <div class="step">You get <b class="mono">${f.coins(qty * r.netSell)}</b> after ${f.pct(s.tax, 3)} tax (${f.coins(r.taxPerUnit * qty)}). <b class="${r.margin > 0 ? "pos" : "neg"}">Profit: ${r.margin > 0 ? "+" : ""}${f.coins(r.margin * qty)}</b> (${f.pct(r.marginPct)})</div>
         ${npcLine}
@@ -595,16 +651,20 @@ function openDrawer(id, { keepScroll = false } = {}) {
     ${r.flags.length ? `<div class="d-note">${r.flags.map((fl) => `<div>• <b>${f.esc(fl.label)}:</b> ${f.esc(fl.tip)}</div>`).join("")}</div>` : ""}
 
     <div class="d-section"><h3>Numbers <span>prices ${f.ago(state.bazaar.lastUpdated)}</span></h3>
+      <div class="d-note" style="margin:0 0 8px">“Loss if dumped” is what you'd lose per item insta-selling right after buying. “Your share” is the estimated slice of buy/sell volume you win against the ${f.int(r.crowdBid)} / ${f.int(r.crowdAsk)} orders near the top.</div>
       <div class="d-stats">
         ${stat("Buy order at", f.price(r.buyAt))}
         ${stat("Sell offer at", f.price(r.sellAt))}
         ${stat("Margin / item", `${r.margin > 0 ? "+" : ""}${f.coins(r.margin)}`, r.margin > 0 ? "pos" : "neg")}
         ${stat("Your profit / hr", f.coins(r.profitHr), "pos")}
-        ${stat("Market profit / hr", f.coins(r.marketProfitHr))}
-        ${stat("Confidence", f.pct(r.confidence, 0))}
+        ${stat("Typical margin (7d)", r.typicalMarginPct != null ? f.pct(r.typicalMarginPct) : "loading…", r.typicalMarginPct > 0 ? "pos" : "")}
+        ${stat("Confidence", `${f.pct(r.confidence, 0)}${r.verified ? " ✓" : ""}`)}
+        ${stat("Break-even sell", f.price(r.breakEven))}
+        ${stat("Loss if dumped", `−${f.coins(Math.max(0, r.dumpLoss))}`, "neg")}
+        ${stat("One flip takes", f.duration(r.cycleHrs))}
         ${stat("Insta-sells / hr", f.rate(r.instaSellsHr))}
         ${stat("Insta-buys / hr", f.rate(r.instaBuysHr))}
-        ${stat("Orders on book", `${f.int(r.buyOrders)} / ${f.int(r.sellOrders)}`)}
+        ${stat("Your share", `${f.pct(r.shareBuy, 0)} / ${f.pct(r.shareSell, 0)}`)}
       </div>
     </div>
 
@@ -693,8 +753,7 @@ function syncSettingsForm() {
   const s = state.settings;
   $("#set-budget").value = f.coins(s.budget);
   $("#set-tax").value = String(s.tax);
-  $("#set-capture").value = Math.round(s.capture * 100);
-  $("#capture-out").textContent = `${Math.round(s.capture * 100)}%`;
+  $("#set-capture").value = String(s.capture);
   $("#set-minflow").value = s.minFlow;
   $("#set-interval").value = String(s.interval);
   $("#set-alert").value = s.alertPct ?? "";
@@ -792,8 +851,7 @@ function bind() {
     syncSettingsForm();
   });
   $("#set-tax").addEventListener("change", (e) => { state.settings.tax = Number(e.target.value); saveSettings(); syncSettingsForm(); });
-  $("#set-capture").addEventListener("input", (e) => { $("#capture-out").textContent = `${e.target.value}%`; });
-  $("#set-capture").addEventListener("change", (e) => { state.settings.capture = Number(e.target.value) / 100; saveSettings(); });
+  $("#set-capture").addEventListener("change", (e) => { state.settings.capture = e.target.value === "auto" ? "auto" : Number(e.target.value); saveSettings(); });
   $("#set-minflow").addEventListener("change", (e) => { state.settings.minFlow = Math.max(0, Number(e.target.value) || 0); saveSettings(); });
   $("#set-interval").addEventListener("change", (e) => {
     state.settings.interval = Number(e.target.value);

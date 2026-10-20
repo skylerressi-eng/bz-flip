@@ -72,9 +72,16 @@
           <small>Account &amp; Profile upgrade from Elizabeth. Tax is charged when a sell fills.</small>
         </label>
         <label class="field">
-          <span>Your share of volume <b id="capture-out"></b></span>
-          <input id="set-capture" type="range" min="1" max="50" step="1" />
-          <small>How much of each item's trading you'll win against other flippers. 5–15% is realistic.</small>
+          <span>Your share of volume</span>
+          <select id="set-capture">
+            <option value="auto">Auto: from order-book competition</option>
+            <option value="0.05">5% (very competitive)</option>
+            <option value="0.1">10%</option>
+            <option value="0.15">15%</option>
+            <option value="0.25">25%</option>
+            <option value="0.5">50% (you relist constantly)</option>
+          </select>
+          <small>How much of each item's trading you'll win against other flippers. Auto looks at how many orders sit near the top price on each side.</small>
         </label>
         <label class="field">
           <span>Min. volume / hour</span>
@@ -170,11 +177,11 @@
           </div>
           <div>
             <h3>Profit / hour</h3>
-            <p>Units/hr = min(volume × your share, what your budget buys, the 71,680-item order cap). Profit/hr = units/hr × margin. <b>Margin × volume</b> shows the whole market's profit, ignoring your budget.</p>
+            <p>Your coins can't be reused until <b>both</b> orders fill, so profit/hr = profit per flip ÷ (buy-order fill time + sell-offer fill time + ~6 min to claim and relist). Fill speed = the item's volume × <b>your share</b>. In Auto mode your share is 1 ÷ (competing orders near the top + 1), because you only get fills while you hold the top spot. Orders are sized to about 2h of fills and respect the 71,680-item and 1B-coin caps.</p>
           </div>
           <div>
             <h3>Score &amp; confidence</h3>
-            <p>Profit/hr is multiplied by a confidence factor built from liquidity, how believable the spread is (50%+ margins are penalized), competition (orders per unit of volume), buy/sell balance, and stability against recorded price history. The best flip right now scores 100.</p>
+            <p>Profit/hr is multiplied by a confidence factor built from liquidity, how believable the spread is (50%+ margins are penalized), competition, buy/sell balance, and <b>7-day history</b>. The top items are checked against <a href="https://sky.coflnet.com" target="_blank" rel="noopener">Coflnet</a>'s 7-day price data: <span class="flag good">Steady margin</span> matches its normal margin, <span class="flag warn">Above normal</span> is a temporary gap that will likely close, and <span class="flag warn">Unusual spread</span> is an item that normally isn't flippable. Checked items get a ✓. The best flip right now scores 100.</p>
           </div>
           <div>
             <h3>Craft flips</h3>
