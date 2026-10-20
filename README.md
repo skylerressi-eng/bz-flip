@@ -26,9 +26,9 @@ npm test            # unit tests for the flip math and history
 
 ## Deploy (free, with the hourly recheck)
 
-1. Merge this into `main`.
+1. Make sure this code is on the repo's **default branch** (scheduled workflows only run there).
 2. In the repo: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. The workflow `.github/workflows/pages.yml` runs every hour (and on every push to `main`). Each run:
+3. Go to **Actions → Hourly bazaar snapshot + deploy → Run workflow** once. After that it runs every hour by itself (and on every push to `main`). Each run:
    - runs the tests,
    - fetches the bazaar and appends a snapshot to `data/history.json` (a rolling 4 days, chained from the previously deployed copy, so nothing is committed),
    - deploys the site to `https://<user>.github.io/bz-flip/`.
