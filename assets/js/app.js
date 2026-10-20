@@ -1,8 +1,8 @@
-import { analyzeAll, analyzeCrafts, planFlips, mayorEffects, rank, buildMeta, RANKINGS, DEFAULT_SETTINGS, TARGET_FILL_HRS, historyStats } from "./analysis.js";
+import { analyzeAll, analyzeCrafts, analyzeFusions, planFlips, mayorEffects, rank, buildMeta, RANKINGS, DEFAULT_SETTINGS, TARGET_FILL_HRS, historyStats } from "./analysis.js";
 import { appendSnapshot, mergedSeries, isHistory, trim, EMPTY_HISTORY } from "./history.js";
 import * as f from "./format.js";
 import { renderPriceChart, sparkline } from "./chart.js";
-import { newEntry, trackStatus, trackerTotals, profitOf } from "./tracker.js";
+import { newEntry, newFusionEntry, repriceInput, trackStatus, trackerTotals, profitOf, unitsOf } from "./tracker.js";
 
 const API = "https://api.hypixel.net/v2";
 const ICON = (id) => `https://sky.coflnet.com/static/icon/${encodeURIComponent(id)}`;
@@ -34,7 +34,7 @@ const store = {
   },
 };
 
-const defaultSettings = () => ({ ...DEFAULT_SETTINGS, interval: 60, purse: 50_000_000, planSlots: null, planShare: 0.35, alertPct: null, v: SETTINGS_VERSION });
+const defaultSettings = () => ({ ...DEFAULT_SETTINGS, crocodileLevel: 0, interval: 60, purse: 50_000_000, planSlots: null, planShare: 0.35, alertPct: null, v: SETTINGS_VERSION });
 
 function loadSettings() {
   const saved = store.get(LS.settings, {});
@@ -68,6 +68,9 @@ const state = {
   crafts: [],
   byId: new Map(),
   craftById: new Map(),
+  fusionData: null,
+  fusions: [],
+  fusionById: new Map(),
   plan: null,
   prevPrices: new Map(),
   prevRanks: {},
@@ -88,12 +91,14 @@ const TABS = [
   { key: "combo", label: "Margin × volume", kind: "flip" },
   { key: "npc", label: "NPC flips", kind: "npc" },
   { key: "craft", label: "Craft flips", kind: "craft" },
+  { key: "fusion", label: "Fusion flips", kind: "fusion" },
   { key: "watch", label: "★ Watchlist", kind: "flip" },
 ];
 const tabDef = () => TABS.find((t) => t.key === state.view.tab) || TABS[0];
 const BLURBS = {
   ...Object.fromEntries(Object.entries(RANKINGS).map(([k, v]) => [k, v.blurb])),
   craft: "Buy the ingredients with buy orders, craft, then sell the result with a sell offer. “Instant” is the profit if you insta-buy and insta-sell everything instead. Green means it's free money right now.",
+  fusion: "Buy two attribute shards with buy orders, fuse them at the Fusion Machine, and sell the result. Recipes come from the SkyShards wiki data (131k combinations); the cheapest working recipe is shown for every shard. Set your Crocodile level in settings for the Reptile bonus.",
   watch: "Items you've starred. Click ☆ on any row to add it here, and set a margin alert in settings.",
 };
 
@@ -152,6 +157,10 @@ function loadExtras() {
     if (isHistory(h)) { state.serverHistory = h; recomputeAndRender(); }
   });
   // Fresh recipes from the hourly job, falling back to the copy shipped in the repo.
+  loadOptional(["data/fusions.json", "assets/data/fusions.json"]).then((d) => {
+    state.fusionData = d?.recipes ? d : { shards: {}, recipes: {} };
+    recomputeAndRender();
+  });
   loadOptional(["data/recipes.json", "assets/data/recipes.json"]).then((r) => {
     state.recipes = r?.recipes ? r : { recipes: {}, reqs: {} };
     recomputeAndRender();
@@ -264,6 +273,8 @@ function compute() {
   state.byId = new Map(state.results.map((r) => [r.id, r]));
   state.crafts = state.recipes ? analyzeCrafts(state.bazaar, state.recipes, s, state.meta) : [];
   state.craftById = new Map(state.crafts.map((c) => [c.id, c]));
+  state.fusions = state.fusionData ? analyzeFusions(state.bazaar, state.fusionData, s, state.meta) : [];
+  state.fusionById = new Map(state.fusions.map((c) => [c.id, c]));
   const ranks = {};
   for (const key of Object.keys(RANKINGS)) {
     const m = new Map();
@@ -273,6 +284,9 @@ function compute() {
   const cm = new Map();
   craftRows(state.view.hideRisky).slice(0, 200).forEach((r, i) => cm.set(r.id, i + 1));
   ranks.craft = cm;
+  const fm = new Map();
+  fusionRows(state.view.hideRisky).slice(0, 200).forEach((r, i) => fm.set(r.id, i + 1));
+  ranks.fusion = fm;
   state.lastRanks = ranks;
   state.plan = planFlips(rank(state.results, "best", s), { purse: state.settings.purse, slots: planSlots(), maxShare: state.settings.planShare });
 }
@@ -287,6 +301,13 @@ function recomputeAndRender({ fetchRefs = true } = {}) {
 function craftRows(hideRisky) {
   return state.crafts.filter((r) => r.margin > 0 && r.marketCraftsHr >= 1 && (!hideRisky || !r.risky)).sort((a, b) => b.adjProfitHr - a.adjProfitHr);
 }
+
+function fusionRows(hideRisky) {
+  return state.fusions.filter((r) => r.margin > 0 && r.marketCraftsHr >= 1 && (!hideRisky || !r.risky)).sort((a, b) => b.adjProfitHr - a.adjProfitHr);
+}
+
+const cap = (w) => w[0].toUpperCase() + w.slice(1);
+const shardTag = (r) => r.shard ? ` · <span title="${f.esc(r.shard.family)} family">${f.esc(r.shard.family.split(" and ")[0])}</span>${r.reptile ? ` <span title="Reptile input: output boosted by your Crocodile level">🐊</span>` : ""}` : "";
 
 function planSlots() {
   return state.settings.planSlots || Math.floor((ORDER_SLOTS[state.settings.tax] || 14) / 2);
@@ -451,6 +472,18 @@ const COLS = {
     scoreCol,
     starCol,
   ],
+  fusion: [
+    rankCol,
+    { label: "Shard", cls: "c-item", cell: (r) => itemCell({ ...r, category: r.shard ? cap(r.shard.rarity) : "Shard" }, `${shardTag(r)} · ×${+r.count.toFixed(2)}`) },
+    { label: "Inputs", key: "cost", num: true, title: "Cost of one fusion using buy orders on both input shards", cell: (r) => { const t = ingredientsText(r); return `<span class="price">${f.coins(r.cost)}</span><span class="price-sub" title="${f.esc(t.full)}">${f.esc(t.short)}</span>`; } },
+    { label: "Sells for", key: "revenue", num: true, title: "Sell offer on the output shards, after tax", cell: (r) => `<span class="price">${f.coins(r.revenue)}</span><span class="price-sub">offer ${f.coins(r.sellAt)}</span>` },
+    { label: "Profit/fuse", key: "margin", num: true, cell: (r) => marginHtml(r.margin, r.marginPct) },
+    { label: "Fusions/hr", key: "marketCraftsHr", num: true, title: "Limited by both the output's buyers and each input's sellers", cell: (r) => `<span class="price">${f.rate(r.marketCraftsHr)}</span>` },
+    { label: "Instant", key: "instantProfit", num: true, title: "Insta-buy both inputs → fuse → insta-sell the output", cell: (r) => `<span class="price ${r.instantProfit > 0 ? "pos" : "muted"}">${r.instantProfit > 0 ? "+" : ""}${f.coins(r.instantProfit)}</span>` },
+    { label: "Profit/hr", key: "profitHr", num: true, title: "Profit per batch of fusions ÷ time for inputs to fill and outputs to sell", cell: (r) => (r.affordable === 0 ? `<span class="flag info">Over budget</span>` : `<span class="profit">${f.coins(r.profitHr)}</span><span class="price-sub">${f.int(r.crafts)} fusions / ${f.duration(r.cycleHrs)}</span>`) },
+    scoreCol,
+    starCol,
+  ],
 };
 
 // ---------- rendering ----------
@@ -469,7 +502,7 @@ function renderAll() {
 
 function renderTabs() {
   $("#tabs").innerHTML = TABS.map((t, i) => {
-    const badge = t.key === "watch" && state.watch.size ? `<span class="badge">${state.watch.size}</span>` : t.key === "craft" && !state.recipes ? `<span class="spinner tiny"></span>` : "";
+    const badge = t.key === "watch" && state.watch.size ? `<span class="badge">${state.watch.size}</span>` : (t.key === "craft" && !state.recipes) || (t.key === "fusion" && !state.fusionData) ? `<span class="spinner tiny"></span>` : "";
     return `<button class="tab" role="tab" data-tab="${t.key}" aria-selected="${state.view.tab === t.key}" title="${t.label} (${i + 1})">${t.label}${badge}</button>`;
   }).join("");
   $("#blurb").textContent = BLURBS[state.view.tab] || "";
@@ -499,6 +532,7 @@ function currentRows() {
   let rows;
   if (tab === "watch") rows = state.results.filter((r) => state.watch.has(r.id)).sort((a, b) => b.adjProfitHr - a.adjProfitHr);
   else if (tab === "craft") rows = craftRows(hideRisky);
+  else if (tab === "fusion") rows = fusionRows(hideRisky);
   else rows = rank(state.results, tab, effectiveSettings(), { hideRisky });
   if (category) rows = rows.filter((r) => r.category === category);
   const q = state.search.trim().toLowerCase();
@@ -519,13 +553,14 @@ function renderTable() {
   let empty = "No items match. Try lowering the minimum volume, turning off “Hide risky”, or clearing the search.";
   if (state.view.tab === "watch") empty = "Your watchlist is empty. Star items with ☆ to track them here.";
   if (state.view.tab === "craft" && !state.recipes) empty = `<span class="spinner"></span> Loading recipes…`;
+  if (state.view.tab === "fusion" && !state.fusionData) empty = `<span class="spinner"></span> Loading 131k fusion recipes…`;
   $("#rows").innerHTML = shown.length
     ? shown.map((r, i) => `<tr data-id="${r.id}">${cols.map((c) => {
         const label = c.label && c.cls !== "c-item" && c.cls !== "c-rank" ? ` data-label="${c.label}"` : "";
         return `<td class="${[c.cls, c.num && "num"].filter(Boolean).join(" ")}"${label}>${c.cell(r, i)}</td>`;
       }).join("")}</tr>`).join("")
     : `<tr><td colspan="12"><div class="empty">${empty}</div></td></tr>`;
-  $("#count").textContent = `Showing ${Math.min(rows.length, state.limit)} of ${rows.length} ${state.view.tab === "craft" ? "crafts" : "items"}`;
+  $("#count").textContent = `Showing ${Math.min(rows.length, state.limit)} of ${rows.length} ${{ craft: "crafts", fusion: "shards" }[state.view.tab] || "items"}`;
   $("#more-btn").hidden = rows.length <= state.limit;
 }
 
@@ -537,15 +572,15 @@ function renderKpis() {
   const s = effectiveSettings();
   const best = rank(state.results, "best", s);
   const margin = rank(state.results, "margin", s).filter((r) => r.flowHr >= Math.max(20, s.minFlow) && !r.flags.some((x) => x.key === "fat"));
-  const vol = rank(state.results, "volume", s).filter((r) => r.marginPct >= 0.01);
   const craft = craftRows(true)[0];
-  const b = best[0], m = margin[0], v = vol[0];
+  const fusion = fusionRows(true)[0];
+  const b = best[0], m = margin[0];
   const hr = `<small class="muted">/hr</small>`;
   $("#kpis").innerHTML = [
     b ? kpi("Best flip right now", `<span class="pos">${f.coins(b.profitHr)}</span>${hr}`, `${f.esc(b.name)} · ${best.length} profitable flips`, b.id) : kpi("Best flip right now", "–", "No profitable flips match your filters"),
     craft ? kpi("Best craft flip", `<span class="pos">${f.coins(craft.profitHr)}</span>${hr}`, `${f.esc(craft.name)} · +${f.coins(craft.margin)}/craft`, craft.id) : kpi("Best craft flip", state.recipes ? "–" : `<span class="spinner"></span>`, state.recipes ? "No profitable crafts right now" : "Loading recipes…"),
     m ? kpi("Best liquid margin", `${f.pct(m.marginPct)}`, `${f.esc(m.name)} · ${f.rate(m.flowHr)}/hr`, m.id) : kpi("Best liquid margin", "–", "–"),
-    v ? kpi("Fastest mover", `${f.rate(v.flowHr)}${hr}`, `${f.esc(v.name)} · ${f.pct(v.marginPct)} margin`, v.id) : kpi("Fastest mover", "–", "–"),
+    fusion ? kpi("Best fusion flip", `<span class="pos">${f.coins(fusion.profitHr)}</span>${hr}`, `${f.esc(fusion.name)} · +${f.coins(fusion.margin)}/fuse`, fusion.id) : kpi("Best fusion flip", state.fusionData ? "–" : `<span class="spinner"></span>`, state.fusionData ? "No profitable fusions right now" : "Loading fusion recipes…"),
   ].join("");
 }
 
@@ -595,12 +630,13 @@ function renderHistoryInfo() {
 
 function updateTitle() {
   const b = rank(state.results, "best", effectiveSettings())[0];
-  const alerts = state.tracker.filter((e) => e.stage !== "done" && trackStatus(e, state.byId.get(e.id)).level === "bad").length;
+  const alerts = state.tracker.filter((e) => e.stage !== "done" && trackStatus(e, lookup).level === "bad").length;
   const base = b ? `${f.coins(b.profitHr)}/hr · ${b.name} | BZ Flip` : "BZ Flip · Hypixel SkyBlock Bazaar Flipper";
   document.title = alerts ? `⚠ ${alerts} to relist · ${base}` : base;
 }
 
 // ---------- my flips ----------
+const lookup = (id) => state.byId.get(id);
 function saveTracker() {
   store.set(LS.tracker, state.tracker);
   renderTracker();
@@ -617,7 +653,7 @@ function trackItem(r, qty) {
 function checkTracker() {
   for (const e of state.tracker) {
     if (e.stage === "done") continue;
-    const st = trackStatus(e, state.byId.get(e.id));
+    const st = trackStatus(e, lookup);
     const prev = state.trackerSeen.get(e.key);
     state.trackerSeen.set(e.key, st.key);
     if (prev && prev !== st.key && st.level === "bad") {
@@ -645,18 +681,21 @@ function renderTracker() {
   const done = state.tracker.filter((e) => e.stage === "done");
   const row = (e) => {
     const r = state.byId.get(e.id);
-    const st = trackStatus(e, r);
-    const stage = { buying: "Buying", selling: "Selling", done: "Sold" }[e.stage];
+    const st = trackStatus(e, lookup);
+    const fusion = e.kind === "fusion";
+    const stage = { buying: fusion ? "Buying inputs" : "Buying", selling: "Selling", done: "Sold" }[e.stage];
     const actions = [
       st.price ? `<button class="copy" data-copy="${st.price.toFixed(1)}">copy ${f.price(st.price)}</button><button class="btn sm" data-act="reprice" data-key="${e.key}">I relisted at ${f.price(st.price)}</button>` : "",
-      e.stage === "buying" ? `<button class="btn sm primary" data-act="filled" data-key="${e.key}">Buy filled ✓</button>` : "",
+      e.stage === "buying" ? `<button class="btn sm primary" data-act="filled" data-key="${e.key}">${fusion ? "Fused ✓" : "Buy filled ✓"}</button>` : "",
       e.stage === "selling" ? `<button class="btn sm primary" data-act="sold" data-key="${e.key}">Sold ✓</button>` : "",
       e.stage !== "done" ? `<button class="btn sm" data-act="edit" data-key="${e.key}" title="Edit quantity and prices">Edit</button>` : "",
       `<button class="btn sm ghost" data-act="remove" data-key="${e.key}" title="Remove">✕</button>`,
     ].join("");
-    const prices = e.stage === "done"
-      ? `${f.int(e.qty)} × ${f.price(e.buyPrice)} → ${f.price(e.soldPrice)}`
-      : `${f.int(e.qty)} × buy ${f.price(e.buyPrice)} → sell ${f.price(e.sellPrice)}`;
+    const prices = fusion
+      ? `${f.int(e.qty)} fusions: ${e.inputs.map((i) => `${f.int(i.qty * e.qty)}× ${i.name.replace(/ Shard$/, "")} @ ${f.price(i.buyPrice)}`).join(" + ")} → ${f.int(unitsOf(e))} @ ${f.price(e.soldPrice ?? e.sellPrice)}`
+      : e.stage === "done"
+        ? `${f.int(e.qty)} × ${f.price(e.buyPrice)} → ${f.price(e.soldPrice)}`
+        : `${f.int(e.qty)} × buy ${f.price(e.buyPrice)} → sell ${f.price(e.sellPrice)}`;
     return `<div class="trk ${st.level}">
       <button class="trk-item" data-open-item="${e.id}">${icon(r || { id: e.id, name: e.name, category: "" }, "sm")}<span><b>${f.esc(e.name)}</b><small>${prices}</small></span></button>
       <span class="trk-stage ${e.stage}">${stage}</span>
@@ -676,19 +715,26 @@ function trackerAction(btn) {
   if (!e) return;
   const r = state.byId.get(e.id);
   if (act === "reprice") {
-    const st = trackStatus(e, r);
-    if (st.price && st.field) e[st.field] = st.price;
+    const st = trackStatus(e, lookup);
+    if (st.field?.startsWith("input:")) repriceInput(e, st.field.slice(6), st.price);
+    else if (st.price && st.field) e[st.field] = st.price;
     toast(`Updated ${e.name} to ${f.price(st.price)}`);
   } else if (act === "filled") {
     e.stage = "selling";
     e.filledAt = Date.now();
-    if (r && r.sellAt * (1 - e.tax) > e.buyPrice) e.sellPrice = r.sellAt; // list at today's best price
+    if (r && r.sellAt * (1 - e.tax) * (e.outPer || 1) > e.buyPrice) e.sellPrice = r.sellAt; // list at today's best price
     copy(e.sellPrice.toFixed(1));
   } else if (act === "sold") {
     e.stage = "done";
     e.soldAt = Date.now();
     e.soldPrice = e.sellPrice;
     toast(`${e.name}: ${profitOf(e) >= 0 ? "+" : "−"}${f.coins(Math.abs(profitOf(e)))} profit`);
+  } else if (act === "edit" && e.kind === "fusion") {
+    const answer = prompt(`${e.name}\nNumber of fusions, sell price per shard:`, `${e.qty}, ${e.sellPrice}`);
+    if (answer == null) return;
+    const [qty, sell] = answer.split(",").map((x) => f.parseCoins(x));
+    if (!(qty >= 1 && sell > 0)) return toast("Enter two numbers, like: 10, 52000");
+    Object.assign(e, { qty: Math.round(qty), sellPrice: sell });
   } else if (act === "edit") {
     const answer = prompt(`${e.name}\nQuantity, buy price, sell price:`, `${e.qty}, ${e.buyPrice}, ${e.sellPrice}`);
     if (answer == null) return;
@@ -704,6 +750,26 @@ function trackerAction(btn) {
 }
 
 // ---------- drawer ----------
+function fusionSection(c) {
+  const signed = (v) => `<b class="${v > 0 ? "pos" : "neg"}">${v > 0 ? "+" : ""}${f.coins(v)}</b>`;
+  const rows = c.inputs.map((i) => `<tr data-goto="${i.id}" title="Open ${f.esc(i.name)}"><td><span class="ing">${icon({ id: i.id, name: i.name, category: "Shards" }, "xs")}${f.esc(i.name)}</span></td><td>${f.int(i.qty)}</td><td>${f.price(i.orderPrice)}</td><td>${f.coins(i.orderPrice * i.qty)}</td><td>${f.rate(i.instaSellsHr)}</td></tr>`).join("");
+  const alts = (c.alts || []).slice(1).map((a) => `<tr><td>${f.esc(a.inputs.map((i) => `${i.qty}× ${i.name.replace(/ Shard$/, "")}`).join(" + "))}</td><td>${+a.count.toFixed(2)}</td><td>${f.coins(a.cost)}</td><td class="${a.margin > 0 ? "pos" : "neg"}">${a.margin > 0 ? "+" : ""}${f.coins(a.margin)}</td><td>${f.coins(a.profitHr)}</td></tr>`).join("");
+  const qty = Math.max(1, c.crafts || 1);
+  return `<div class="d-section"><h3>Fuse it <span>${c.shard ? `${f.esc(c.shard.rarity)} · ${f.esc(c.shard.family)} · ${f.esc(c.shard.type)}` : ""}</span></h3>
+    <div class="recipe"><table>
+      <thead><tr><th>Input shard</th><th>Per fuse</th><th>Buy order</th><th>Total</th><th>Sells/hr</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div class="craft-modes">
+      <div><span class="label">Patient · buy orders → fuse → sell offer</span><span>${f.coins(c.cost)} → ${f.coins(c.revenue)} (makes ${+c.count.toFixed(2)})</span>${signed(c.margin)}</div>
+      <div><span class="label">Instant · insta-buy → fuse → insta-sell</span><span>${f.coins(c.instantCost)} → ${f.coins(c.instantRevenue)}</span>${signed(c.instantProfit)}</div>
+    </div>
+    <button class="btn btn-primary track-btn" data-track-fusion="${c.id}">Track this fusion (${f.int(qty)} fusions)</button>
+    <div class="d-note">Place buy orders for ${c.inputs.map((i) => `<b>${f.int(i.qty * qty)}× ${f.esc(i.name)}</b>`).join(" and ")}, then press track. “My flips” watches both inputs for outbids, then your shard sell offer for undercuts.${c.reptile ? " Includes your Crocodile bonus for Reptile inputs." : ""}</div>
+    ${alts ? `<div class="recipe" style="margin-top:10px"><table><thead><tr><th>Other recipes</th><th>Makes</th><th>Cost</th><th>Profit</th><th>/hr</th></tr></thead><tbody>${alts}</tbody></table></div>` : ""}
+  </div>`;
+}
+
 function craftSection(c) {
   const rows = c.inputs.map((i) => `<tr data-goto="${i.id}" title="Open ${f.esc(i.name)}"><td><span class="ing">${icon({ id: i.id, name: i.name, category: "", tier: state.meta[i.id]?.tier }, "xs")}${f.esc(i.name)}</span></td><td>${f.int(i.qty)}</td><td>${f.price(i.orderPrice)}</td><td>${f.coins(i.orderPrice * i.qty)}</td><td>${f.rate(i.instaSellsHr)}</td></tr>`).join("");
   const signed = (v) => `<b class="${v > 0 ? "pos" : "neg"}">${v > 0 ? "+" : ""}${f.coins(v)}</b>`;
@@ -730,6 +796,7 @@ function openDrawer(id, { keepScroll = false } = {}) {
   if (!state.refs.has(id)) ensureRefs([id]).then(() => { if (state.openId === id) openDrawer(id, { keepScroll: true }); });
   const qty = r.orderQty;
   const craft = state.craftById.get(id);
+  const fusionRes = state.fusionById.get(id);
   const npcLine = r.npcProfit > 0 && qty > 0
     ? `<div class="step">Or skip the sell offer and <b>sell to any NPC</b> for <b class="mono">${f.price(r.npcSell)}</b> each: <b class="pos">+${f.coins(r.npcProfit * qty)}</b> with no tax and no waiting.</div>`
     : "";
@@ -783,6 +850,7 @@ function openDrawer(id, { keepScroll = false } = {}) {
     <div class="d-section"><h3>How to flip it <span>budget ${f.coins(s.budget)}</span></h3>${steps}
       ${qty > 0 ? `<button class="btn btn-primary track-btn" data-track="${id}">Track this flip</button><div class="d-note">Press it after placing the buy order. “My flips” then warns you when you're outbid or undercut.</div>` : ""}</div>
     ${craft ? craftSection(craft) : ""}
+    ${fusionRes ? fusionSection(fusionRes) : ""}
 
     <div class="d-section"><h3>Price history <span>${trend}</span></h3><div class="chart-box" id="chart"></div></div>
 
@@ -868,6 +936,7 @@ function syncSettingsForm() {
   $("#set-tax").value = String(s.tax);
   $("#set-capture").value = String(s.capture);
   $("#set-minflow").value = s.minFlow;
+  $("#set-croc").value = s.crocodileLevel || 0;
   $("#set-interval").value = String(s.interval);
   $("#set-alert").value = s.alertPct ?? "";
   $("#plan-purse").value = f.coins(s.purse);
@@ -940,6 +1009,15 @@ function bind() {
     if (s) return toggleWatch(s.dataset.star);
     const g = e.target.closest("[data-goto]");
     if (g && state.byId.has(g.dataset.goto)) return openDrawer(g.dataset.goto);
+    const tf = e.target.closest("[data-track-fusion]");
+    if (tf) {
+      const c = state.fusionById.get(tf.dataset.trackFusion);
+      if (!c) return;
+      state.tracker.unshift(newFusionEntry(c, { qty: Math.max(1, c.crafts || 1), tax: effectiveSettings().tax }));
+      if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+      saveTracker();
+      return toast(`Tracking ${c.name} fusion`);
+    }
     const t = e.target.closest("[data-track]");
     if (t) {
       const r = state.byId.get(t.dataset.track);
@@ -969,7 +1047,7 @@ function bind() {
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "/") { e.preventDefault(); $("#search").focus(); }
     else if (e.key === "r" || e.key === "R") refresh({ manual: true });
-    else if (/^[1-7]$/.test(e.key) && !state.openId) setTab(TABS[Number(e.key) - 1].key);
+    else if (/^[1-8]$/.test(e.key) && !state.openId) setTab(TABS[Number(e.key) - 1].key);
   });
 
   // Icons: fall back to initials when Coflnet has no image for an item.
@@ -986,6 +1064,7 @@ function bind() {
   });
   $("#set-tax").addEventListener("change", (e) => { state.settings.tax = Number(e.target.value); saveSettings(); syncSettingsForm(); });
   $("#set-capture").addEventListener("change", (e) => { state.settings.capture = e.target.value === "auto" ? "auto" : Number(e.target.value); saveSettings(); });
+  $("#set-croc").addEventListener("change", (e) => { state.settings.crocodileLevel = Math.max(0, Math.min(10, Math.round(Number(e.target.value) || 0))); saveSettings(); syncSettingsForm(); });
   $("#set-minflow").addEventListener("change", (e) => { state.settings.minFlow = Math.max(0, Number(e.target.value) || 0); saveSettings(); });
   $("#set-interval").addEventListener("change", (e) => {
     state.settings.interval = Number(e.target.value);

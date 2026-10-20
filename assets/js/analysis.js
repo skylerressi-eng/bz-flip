@@ -328,7 +328,7 @@ function pct(x) {
 //   instant: insta-buy ingredients -> insta-sell output (no waiting, rarely profitable)
 // The patient cycle is timed like a flip: ingredient orders fill in parallel
 // (the slowest one decides), then the crafted items sell.
-export function analyzeCrafts(bazaar, recipesData, settings = DEFAULT_SETTINGS, metaById = {}) {
+export function analyzeCrafts(bazaar, recipesData, settings = DEFAULT_SETTINGS, metaById = {}, { kind = "craft" } = {}) {
   const { budget, tax, capture } = { ...DEFAULT_SETTINGS, ...settings };
   const P = bazaar.products || {};
   const cache = new Map();
@@ -353,6 +353,7 @@ export function analyzeCrafts(bazaar, recipesData, settings = DEFAULT_SETTINGS, 
     const o = top(id);
     if (!o.bid || !o.ask) continue;
     let best = null;
+    const all = [];
     for (const rec of recipes) {
       let patientCost = 0, instantCost = 0, ingredientCrafts = Infinity, targetCrafts = Infinity, ok = true;
       const inputs = [];
@@ -385,7 +386,7 @@ export function analyzeCrafts(bazaar, recipesData, settings = DEFAULT_SETTINGS, 
         craftsHr = crafts / cycleHrs;
       }
       const r = {
-        id, kind: "craft",
+        id, kind, pair: rec.pair || null,
         name: metaById[id]?.name || prettyId(id),
         category: metaById[id]?.category || categoryOf(id),
         tier: metaById[id]?.tier || null,
@@ -398,9 +399,11 @@ export function analyzeCrafts(bazaar, recipesData, settings = DEFAULT_SETTINGS, 
         req: recipesData.reqs?.[id] || null,
         outputFlowHr: o.instaBuysHr,
       };
+      all.push(r);
       if (!best || r.profitHr > best.profitHr || (r.profitHr === best.profitHr && r.margin > best.margin)) best = r;
     }
     if (!best) continue;
+    best.alts = all.sort((a, b) => b.profitHr - a.profitHr || b.margin - a.margin).slice(0, 6);
     const flags = [];
     if (best.instantProfit > 0) flags.push({ key: "instant", level: "good", label: "Instant profit", tip: "Profitable even when you insta-buy every ingredient and insta-sell the result. No waiting on orders." });
     if (o.ask / o.bid > 4) flags.push({ key: "wide", level: "bad", label: "Dead spread", tip: "The result's ask is over 4x its bid, so the sell price is not reliable." });
@@ -471,4 +474,79 @@ export function mayorEffects(election) {
     }
   }
   return { taxMult, mayor: mayor.name, minister: mayor.minister?.name || null, notes };
+}
+
+// ---- shard fusion ----------------------------------------------------------
+// fusionData (scripts/fusions.mjs): { shards: { C1: { id, name, rarity, family, type, fuse } },
+//                                     recipes: { C1: { "2": "C4,U1;C4,U2" } } }
+// A fusion consumes `fuse` of each input shard and makes `qty` of the output,
+// times the Crocodile bonus (+2% per level) when either input is a Reptile.
+// 131k recipe pairs is too many to analyze fully each refresh, so for every
+// output we keep only the few cheapest pairs at current prices.
+
+const parsedFusions = new WeakMap();
+function parseFusions(fusionData) {
+  if (parsedFusions.has(fusionData)) return parsedFusions.get(fusionData);
+  const out = [];
+  for (const [code, byQty] of Object.entries(fusionData.recipes || {})) {
+    const pairs = [];
+    for (const [qty, list] of Object.entries(byQty)) {
+      for (const p of list.split(";")) {
+        const [a, b] = p.split(",");
+        pairs.push({ a, b, qty: Number(qty) });
+      }
+    }
+    out.push({ code, pairs });
+  }
+  parsedFusions.set(fusionData, out);
+  return out;
+}
+
+export function fusionRecipes(fusionData, bazaar, { crocodileLevel = 0, keep = 4 } = {}) {
+  const S = fusionData?.shards || {};
+  const P = bazaar.products || {};
+  const croc = 1 + 0.02 * clamp(crocodileLevel, 0, 10);
+  const order = (code) => { const b = P[S[code]?.id]?.sell_summary?.[0]?.pricePerUnit; return b ? b + TICK : Infinity; };
+  const insta = (code) => P[S[code]?.id]?.buy_summary?.[0]?.pricePerUnit || Infinity;
+  const recipes = {};
+  for (const { code, pairs } of parseFusions(fusionData)) {
+    const outId = S[code]?.id;
+    if (!outId || !P[outId]) continue;
+    const scored = [];
+    for (const p of pairs) {
+      const A = S[p.a], B = S[p.b];
+      if (!A || !B) continue;
+      const n = p.qty * (A.family.includes("Reptile") || B.family.includes("Reptile") ? croc : 1);
+      const patient = (A.fuse * order(p.a) + B.fuse * order(p.b)) / n;
+      if (!Number.isFinite(patient)) continue;
+      scored.push({ p, n, patient, instant: (A.fuse * insta(p.a) + B.fuse * insta(p.b)) / n });
+    }
+    const pick = new Set([
+      ...scored.sort((x, y) => x.patient - y.patient).slice(0, keep),
+      ...scored.sort((x, y) => x.instant - y.instant).slice(0, keep),
+    ]);
+    recipes[outId] = [...pick].map(({ p, n }) => {
+      const A = S[p.a], B = S[p.b];
+      const inputs = { [A.id]: A.fuse };
+      inputs[B.id] = (inputs[B.id] || 0) + B.fuse;
+      return { in: inputs, out: n, pair: [p.a, p.b] };
+    });
+  }
+  return recipes;
+}
+
+export function analyzeFusions(bazaar, fusionData, settings = DEFAULT_SETTINGS, metaById = {}) {
+  const recipes = fusionRecipes(fusionData, bazaar, { crocodileLevel: settings.crocodileLevel || 0 });
+  const byId = {};
+  for (const s of Object.values(fusionData?.shards || {})) byId[s.id] = s;
+  const named = (id) => metaById[id] || (byId[id] ? { name: `${byId[id].name} Shard`, category: "Shards" } : {});
+  const meta = new Proxy({}, { get: (_, id) => named(id) });
+  const out = analyzeCrafts(bazaar, { recipes }, settings, meta, { kind: "fusion" });
+  for (const r of out) {
+    r.shard = byId[r.id] || null;
+    r.category = "Shards";
+    if (r.shard) r.tier = r.shard.rarity.toUpperCase(); // colours the icon by rarity
+    r.reptile = !!r.pair?.some((c) => fusionData.shards[c]?.family.includes("Reptile"));
+  }
+  return out;
 }

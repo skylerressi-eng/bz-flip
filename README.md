@@ -5,7 +5,8 @@ A fast, dependency-free website that scans **every product and craft on the Hypi
 ## Features
 
 - **Live data:** refreshes every minute by default (30s–1h is configurable) and shows how old Hypixel's snapshot is, with a warning if the API falls behind. It pauses while the tab is hidden, and prices that changed flash green or red.
-- **Seven rankings:** Best flips (risk-adjusted profit/hr), Highest margin, Highest volume, Margin × volume, NPC flips, **Craft flips**, and your ★ Watchlist.
+- **Eight rankings:** Best flips (risk-adjusted profit/hr), Highest margin, Highest volume, Margin × volume, NPC flips, **Craft flips**, **Fusion flips**, and your ★ Watchlist.
+- **Fusion flips:** all 131k Attribute Shard fusion recipes from the wiki-maintained [SkyShards data](https://github.com/skyblock-wiki/SkyShards-Parser-Wiki) (refreshed daily). Finds the cheapest profitable recipe for every shard at live prices, with fuse amounts, output counts and the Crocodile bonus for Reptile inputs, plus alternative recipes. **Track a fusion** in My flips: it watches both input buy orders for outbids, then your output sell offer for undercuts.
 - **Craft flips:** recipes from the [NotEnoughUpdates repo](https://github.com/NotEnoughUpdates/NotEnoughUpdates-REPO), refreshed daily. Shows both patient (buy orders → sell offer) and instant (insta-buy → insta-sell) profit, crafts/hr limited by every ingredient's volume, and the collection level each recipe needs.
 - **Flip planner:** enter your coins and it allocates them across the best flips. It sizes each order to about an hour of volume, caps how much goes into one item, and respects your order slots (14, 21 or 28 with Bazaar Flipper). One click copies the plan.
 - **Mayor-aware tax:** reads the live election API, applies Derpy's QUAD TAXES automatically, and shows any other perk that touches bazaar tax.
@@ -16,7 +17,7 @@ A fast, dependency-free website that scans **every product and craft on the Hypi
 - **Item panel:** step-by-step flip instructions with copy buttons (including the `/bz` command), fill-time estimates, the craft recipe, a price-history chart, and the top 10 levels of the order book.
 - **My flips tracker:** log the orders you placed (one click from any item, or “Track all” from the planner). Every refresh checks the live order book and tells you when you've been **outbid or undercut**, with the exact relist price (and a warning when relisting would go below break-even). It sends a browser notification, shows ⚠ in the tab title, and keeps your real profit for the last 24h and all time.
 - **Watchlist alerts:** get a notification when a starred item's margin reaches your target.
-- 7-day sparklines, break-even and dump-loss prices, rank movement, real item icons, search, category filter, sortable columns, keyboard shortcuts (`/`, `R`, `1`–`7`, `Esc`), light/dark themes, and a mobile layout.
+- 7-day sparklines, break-even and dump-loss prices, rank movement, real item icons, search, category filter, sortable columns, keyboard shortcuts (`/`, `R`, `1`–`8`, `Esc`), light/dark themes, and a mobile layout.
 
 ## API key?
 
@@ -38,7 +39,7 @@ npm run recipes     # refresh the bundled fallback recipes in assets/data
 3. Go to **Actions → Hourly bazaar snapshot + deploy → Run workflow** once. After that it runs every hour by itself (and on every push to `main`). Each run:
    - runs the tests,
    - fetches the bazaar and appends a snapshot to `data/history.json` (a rolling 4 days, chained from the previously deployed copy, so nothing is committed),
-   - rebuilds `data/recipes.json` from the NEU repo once a day (the site falls back to `assets/data/recipes.json` if that fails),
+   - rebuilds `data/recipes.json` (NEU) and `data/fusions.json` (SkyShards) once a day (the site falls back to the copies in `assets/data/` if that fails),
    - deploys the site to `https://<user>.github.io/bz-flip/`.
 
 GitHub pauses scheduled workflows after 60 days with no repo activity. Re-enable it from the Actions tab if that happens.
@@ -74,7 +75,9 @@ assets/js/chart.js         SVG price chart
 assets/js/format.js        number formatting
 scripts/snapshot.mjs       hourly price snapshot job
 scripts/recipes.mjs        daily recipe extractor (NEU repo)
+scripts/fusions.mjs        daily shard fusion data (SkyShards wiki parser)
 assets/data/recipes.json   bundled fallback recipes
+assets/data/fusions.json   bundled fallback fusion recipes
 tests/                     node:test unit tests
 ```
 

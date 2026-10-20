@@ -3,6 +3,8 @@
 //
 // entry: { key, id, name, qty, buyPrice, sellPrice, stage: "buying" | "selling" | "done",
 //          created, filledAt?, soldAt?, soldPrice?, tax }
+// fusion entries add { kind: "fusion", outPer, inputs: [{ id, name, qty, buyPrice }] }:
+// qty counts fusions, buyPrice is the cost of one fusion and sellPrice is per output shard.
 
 const round1 = (n) => Math.round(n * 10) / 10;
 const EPS = 0.05; // prices are in 0.1 steps; anything closer is "the same price"
@@ -21,14 +23,52 @@ export function newEntry(r, { qty, tax, now = Date.now() }) {
   };
 }
 
-export const profitOf = (e, sellPrice = e.soldPrice ?? e.sellPrice) => (sellPrice * (1 - e.tax) - e.buyPrice) * e.qty;
+// craft/fusion result `c` from analyzeCrafts/analyzeFusions; qty = number of fusions
+export function newFusionEntry(c, { qty, tax, now = Date.now() }) {
+  return {
+    key: `${c.id}-${now.toString(36)}`,
+    kind: "fusion",
+    id: c.id,
+    name: c.name,
+    qty,
+    outPer: c.count,
+    inputs: c.inputs.map((i) => ({ id: i.id, name: i.name, qty: i.qty, buyPrice: i.orderPrice })),
+    buyPrice: c.cost,
+    sellPrice: c.sellAt,
+    stage: "buying",
+    created: now,
+    tax,
+  };
+}
+
+export const unitsOf = (e) => e.qty * (e.outPer || 1); // items you end up selling
+export const profitOf = (e, sellPrice = e.soldPrice ?? e.sellPrice) => (sellPrice * (1 - e.tax) * (e.outPer || 1) - e.buyPrice) * e.qty;
+
+// Change one input's buy price on a fusion entry and keep the per-fusion cost in sync.
+export function repriceInput(e, id, price) {
+  const input = e.inputs?.find((i) => i.id === id);
+  if (!input) return;
+  input.buyPrice = price;
+  e.buyPrice = e.inputs.reduce((sum, i) => sum + i.qty * i.buyPrice, 0);
+}
 
 // What the user should do about this order right now.
-// top: { bestBid, bestAsk } from the live bazaar (undefined if the item vanished).
-export function trackStatus(e, top) {
+// lookup(id) -> { bestBid, bestAsk } from the live bazaar (undefined if the item vanished).
+export function trackStatus(e, lookup) {
   if (e.stage === "done") return { key: "done", level: "info", text: `Sold · ${signed(profitOf(e))} profit` };
+  const top = lookup(e.id);
   if (!top || !top.bestBid || !top.bestAsk) return { key: "unknown", level: "warn", text: "No live price for this item right now." };
-  const breakEven = e.buyPrice / (1 - e.tax);
+  const breakEven = e.buyPrice / (e.outPer || 1) / (1 - e.tax);
+  if (e.stage === "buying" && e.kind === "fusion") {
+    for (const i of e.inputs) {
+      const t = lookup(i.id);
+      if (t?.bestBid > i.buyPrice + EPS) {
+        const price = round1(t.bestBid + 0.1);
+        return { key: "outbid", level: "bad", text: `Outbid on ${i.name}: someone is buying at ${fmt(t.bestBid)}. Re-order at ${fmt(price)}.`, price, field: `input:${i.id}` };
+      }
+    }
+    return { key: "top", level: "good", text: `All ${e.inputs.length} input buy orders are on top. Fuse when they fill.` };
+  }
   if (e.stage === "buying") {
     if (top.bestBid > e.buyPrice + EPS) {
       const price = round1(top.bestBid + 0.1);

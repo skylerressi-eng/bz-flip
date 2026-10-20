@@ -84,6 +84,11 @@
           <small>How much of each item's trading you'll win against other flippers. Auto looks at how many orders sit near the top price on each side.</small>
         </label>
         <label class="field">
+          <span>Crocodile shard level</span>
+          <input id="set-croc" type="number" min="0" max="10" step="1" />
+          <small>Your Crocodile attribute level (0–10). Fusions with a Reptile input make +2% more shards per level.</small>
+        </label>
+        <label class="field">
           <span>Min. volume / hour</span>
           <input id="set-minflow" type="number" min="0" step="1" />
           <small>Hide items that trade slower than this many units per hour.</small>
@@ -200,6 +205,10 @@
             <p>Recipes come from the community <a href="https://github.com/NotEnoughUpdates/NotEnoughUpdates-REPO" target="_blank" rel="noopener">NotEnoughUpdates repo</a>, refreshed daily. <b>Patient</b>: buy orders on the ingredients, then a sell offer on the result. <b>Instant</b>: insta-buy everything, craft, insta-sell. That's rare but risk-free when it's positive. Crafts/hr is limited by both the result's buyers and every ingredient's sellers. Many recipes need a collection level, which is shown on each item.</p>
           </div>
           <div>
+            <h3>Fusion flips</h3>
+            <p>Every Attribute Shard fusion (131k recipe pairs) from the wiki-maintained <a href="https://github.com/skyblock-wiki/SkyShards-Parser-Wiki" target="_blank" rel="noopener">SkyShards data</a>, refreshed daily. A fusion uses each input's fuse amount (2 or 5 shards) and makes 1–2 output shards, plus your Crocodile bonus when an input is a Reptile. For every shard the cheapest few recipes at live prices are analyzed with the same cycle-time model as flips, and you can track a fusion in My flips.</p>
+          </div>
+          <div>
             <h3>Flags</h3>
             <p><span class="flag bad">Dead spread</span> the ask is over 4× the bid. <span class="flag bad">Illiquid</span> fewer than 1 unit trades per hour. <span class="flag bad">Price spike</span> the ask is 30%+ above its recent median, a classic manipulation pattern. <span class="flag warn">One-sided</span> the price is trending. <span class="flag good">NPC floor</span> an NPC buys it for about your buy price, so your downside is limited.</p>
           </div>
@@ -221,7 +230,7 @@
   </main>
 
   <footer class="wrap footer">
-    <p>Data: <a href="https://api.hypixel.net/" target="_blank" rel="noopener">Hypixel Public API</a> · recipes: <a href="https://github.com/NotEnoughUpdates/NotEnoughUpdates-REPO" target="_blank" rel="noopener">NEU repo</a> · icons: <a href="https://sky.coflnet.com" target="_blank" rel="noopener">Coflnet</a>. Not affiliated with Hypixel. Keyboard: <kbd>/</kbd> search · <kbd>R</kbd> refresh · <kbd>1</kbd>–<kbd>7</kbd> tabs · <kbd>Esc</kbd> close.</p>
+    <p>Data: <a href="https://api.hypixel.net/" target="_blank" rel="noopener">Hypixel Public API</a> · recipes: <a href="https://github.com/NotEnoughUpdates/NotEnoughUpdates-REPO" target="_blank" rel="noopener">NEU repo</a> · icons &amp; 7-day history: <a href="https://sky.coflnet.com" target="_blank" rel="noopener">Coflnet</a> · fusions: <a href="https://github.com/Campionnn/SkyShards" target="_blank" rel="noopener">SkyShards</a>. Not affiliated with Hypixel. Keyboard: <kbd>/</kbd> search · <kbd>R</kbd> refresh · <kbd>1</kbd>–<kbd>8</kbd> tabs · <kbd>Esc</kbd> close.</p>
   </footer>
 
   <div class="drawer-backdrop" id="backdrop" hidden></div>

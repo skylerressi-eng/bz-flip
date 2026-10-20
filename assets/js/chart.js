@@ -15,7 +15,7 @@ export function renderPriceChart(box, series) {
   let lo = Infinity, hi = -Infinity;
   for (const p of series) { lo = Math.min(lo, p.bid, p.ask); hi = Math.max(hi, p.bid, p.ask); }
   const span = hi - lo || hi * 0.05 || 1;
-  lo -= span * 0.08; hi += span * 0.08;
+  lo = Math.max(0, lo - span * 0.08); hi += span * 0.08;
   const x = (t) => pad.l + ((t - t0) / (t1 - t0 || 1)) * (W - pad.l - pad.r);
   const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
   const path = (k) => series.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p[k]).toFixed(1)}`).join("");

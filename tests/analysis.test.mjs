@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeProduct, analyzeAll, analyzeCrafts, planFlips, mayorEffects, shareOf, rank, prettyId, buildMeta, DEFAULT_SETTINGS } from "../assets/js/analysis.js";
+import { analyzeProduct, analyzeAll, analyzeCrafts, analyzeFusions, planFlips, mayorEffects, shareOf, rank, prettyId, buildMeta, DEFAULT_SETTINGS } from "../assets/js/analysis.js";
 import { appendSnapshot, seriesFor, mergedSeries, EMPTY_HISTORY } from "../assets/js/history.js";
 
 // bid = best buy order (sell_summary), ask = best sell offer (buy_summary)
@@ -186,4 +186,31 @@ test("mayor effects: Derpy quadruples tax, others pass through", () => {
   assert.equal(diaz.taxMult, 1);
   assert.equal(diaz.notes.length, 0);
   assert.equal(mayorEffects(null).taxMult, 1);
+});
+
+test("fusion: fuse amounts, output qty, crocodile bonus for reptiles", () => {
+  const fusionData = {
+    shards: {
+      A1: { id: "SHARD_A", name: "A", rarity: "common", family: "Bug", type: "Global", fuse: 5 },
+      B1: { id: "SHARD_B", name: "B", rarity: "common", family: "Reptile", type: "Global", fuse: 2 },
+      O1: { id: "SHARD_O", name: "O", rarity: "rare", family: "Bug", type: "Global", fuse: 5 },
+    },
+    recipes: { O1: { "2": "A1,B1" } },
+  };
+  const bz = { products: {
+    SHARD_A: product({ bid: 100, ask: 110 }),
+    SHARD_B: product({ bid: 300, ask: 320 }),
+    SHARD_O: product({ bid: 900, ask: 1000 }),
+  } };
+  const s = { ...DEFAULT_SETTINGS, budget: 1e9 };
+  const [f] = analyzeFusions(bz, fusionData, s);
+  assert.equal(f.kind, "fusion");
+  near(f.cost, 5 * 100.1 + 2 * 300.1);
+  near(f.count, 2);
+  near(f.revenue, 999.9 * (1 - 0.0125) * 2);
+  assert.ok(f.reptile);
+  const [croc] = analyzeFusions(bz, fusionData, { ...s, crocodileLevel: 10 });
+  near(croc.count, 2 * 1.2);
+  assert.ok(croc.margin > f.margin);
+  assert.equal(f.shard.rarity, "rare");
 });

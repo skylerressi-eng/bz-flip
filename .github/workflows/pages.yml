@@ -60,6 +60,10 @@ jobs:
         continue-on-error: true
         run: node scripts/recipes.mjs --out _site/data --prev "${{ steps.pages.outputs.base_url }}/data/recipes.json" --max-age-hours 24
 
+      - name: Refresh shard fusion recipes (daily, from the SkyShards wiki data)
+        continue-on-error: true
+        run: node scripts/fusions.mjs --out _site/data --prev "${{ steps.pages.outputs.base_url }}/data/fusions.json" --max-age-hours 24
+
       - uses: actions/upload-pages-artifact@v3
 
       - id: deployment
