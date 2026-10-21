@@ -2,7 +2,7 @@ import { analyzeAll, analyzeCrafts, analyzeFusions, planFlips, mayorEffects, ran
 import { appendSnapshot, mergedSeries, isHistory, trim, EMPTY_HISTORY } from "./history.js";
 import * as f from "./format.js";
 import { renderPriceChart, sparkline } from "./chart.js";
-import { newEntry, newFusionEntry, repriceInput, trackStatus, trackerTotals, profitOf, unitsOf } from "./tracker.js";
+import { newEntry, newFusionEntry, repriceInput, trackStatus, trackerTotals, profitOf, unitsOf, dailyProfit, checkPriceAlerts } from "./tracker.js";
 
 const API = "https://api.hypixel.net/v2";
 const ICON = (id) => `https://sky.coflnet.com/static/icon/${encodeURIComponent(id)}`;
@@ -20,7 +20,10 @@ const LS = {
   history: "bzflip.history.v1",
   theme: "bzflip.theme",
   tracker: "bzflip.tracker",
+  priceAlerts: "bzflip.priceAlerts",
+  quickstart: "bzflip.quickstartDone",
 };
+const BACKUP_KEYS = ["settings", "view", "watch", "tracker", "priceAlerts"];
 // order slots per Bazaar Flipper level (the tax rate identifies the level)
 const ORDER_SLOTS = { 0.0125: 14, 0.01125: 21, 0.01: 28 };
 
@@ -51,6 +54,8 @@ const state = {
   view: { tab: "best", category: "", hideRisky: true, sort: null, ...store.get(LS.view, {}) },
   watch: new Set(store.get(LS.watch, [])),
   tracker: store.get(LS.tracker, []),
+  priceAlerts: store.get(LS.priceAlerts, {}),
+  priceArmed: new Set(),
   trackerSeen: new Map(), // entry key -> last status key, to notify only on change
   showHistory: false,
   search: "",
@@ -248,6 +253,7 @@ async function refresh({ manual = false } = {}) {
     ensureRefs(refCandidates());
     checkAlerts();
     checkTracker();
+    checkPriceAlertsNow();
     setTimeout(() => state.prevPrices.clear(), 4000); // price flashes are one-shot
     state.nextAt = state.fetchedAt + state.settings.interval * 1000;
     state.loading = false;
@@ -321,6 +327,30 @@ function announceChanges(manual) {
   if (manual || fresh) toast(fresh ? `Updated: ${fresh} new item${fresh > 1 ? "s" : ""} in the top 10` : "Updated: prices are current");
 }
 
+// Android Chrome only allows notifications through the service worker, so use it when we can.
+async function notify(title, body, { tag, id } = {}) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const opts = { body, tag, icon: "assets/icons/icon-192.png", badge: "assets/icons/icon-192.png", data: { id } };
+  try {
+    const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : null;
+    if (reg) return await reg.showNotification(title, opts);
+    const n = new Notification(title, opts);
+    if (id) n.onclick = () => { window.focus(); openDrawer(id); };
+  } catch { /* notifications unavailable here */ }
+}
+
+function askNotifications() {
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+}
+
+function checkPriceAlertsNow() {
+  for (const a of checkPriceAlerts(state.priceAlerts, lookup, state.priceArmed)) {
+    const name = state.byId.get(a.id)?.name || a.id;
+    toast(`🔔 ${name}: ${a.text}`);
+    notify("BZ Flip price alert", `${name}: ${a.text}`, { tag: `bzflip-price-${a.id}-${a.kind}`, id: a.id });
+  }
+}
+
 function checkAlerts() {
   const pct = state.settings.alertPct;
   if (!(pct > 0)) return;
@@ -331,12 +361,7 @@ function checkAlerts() {
     state.alerted.set(id, Date.now());
     const body = `${r.name}: ${f.pct(r.marginPct)} margin (+${f.coins(r.margin)} each). Buy ${f.price(r.buyAt)}, sell ${f.price(r.sellAt)}.`;
     toast(`🔔 ${body}`);
-    try {
-      if ("Notification" in window && Notification.permission === "granted") {
-        const n = new Notification("BZ Flip alert", { body, tag: `bzflip-${id}` });
-        n.onclick = () => { window.focus(); openDrawer(id); };
-      }
-    } catch { /* some browsers only allow notifications from a service worker */ }
+    notify("BZ Flip margin alert", body, { tag: `bzflip-${id}`, id });
   }
 }
 
@@ -402,7 +427,8 @@ function itemCell(r, extra = "") {
   const trend = r.history?.askChange24;
   const trendHtml = Number.isFinite(trend) && Math.abs(trend) >= 0.005 ? `<span class="${trend > 0 ? "pos" : "neg"}">${trend > 0 ? "▲" : "▼"}${f.pct(Math.abs(trend))} 24h</span>` : "";
   const flags = (r.flags || []).slice(0, 2).map(flagHtml).join("");
-  return `<div class="item-cell">${icon(r)}<div><div class="item-name">${f.esc(r.name)}</div><div class="item-sub">${f.esc(r.category)}${trendHtml ? " · " + trendHtml : ""}${extra} ${flags}</div></div></div>`;
+  const bell = state.priceAlerts[r.id] ? ` <span class="bell" title="Price alert set">🔔</span>` : "";
+  return `<div class="item-cell">${icon(r)}<div><div class="item-name">${f.esc(r.name)}${bell}</div><div class="item-sub">${f.esc(r.category)}${trendHtml ? " · " + trendHtml : ""}${extra} ${flags}</div></div></div>`;
 }
 
 function marginHtml(margin, pctVal) {
@@ -647,7 +673,7 @@ function trackItem(r, qty) {
   if (!r || qty < 1) return;
   state.tracker.unshift(newEntry(r, { qty, tax: effectiveSettings().tax }));
   state.trackerSeen.delete(state.tracker[0].key);
-  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+  askNotifications();
 }
 
 function checkTracker() {
@@ -659,9 +685,7 @@ function checkTracker() {
     if (prev && prev !== st.key && st.level === "bad") {
       const body = `${e.name}: ${st.text}`;
       toast(`⚠ ${body}`);
-      try {
-        if ("Notification" in window && Notification.permission === "granted") new Notification("BZ Flip: relist needed", { body, tag: `bzflip-track-${e.key}` });
-      } catch { /* notifications unavailable */ }
+      notify("BZ Flip: relist needed", body, { tag: `bzflip-track-${e.key}`, id: e.id });
     }
   }
 }
@@ -703,9 +727,28 @@ function renderTracker() {
       <div class="trk-actions">${actions}</div>
     </div>`;
   };
-  body.innerHTML = open.map(row).join("")
+  body.innerHTML = profitChart()
+    + open.map(row).join("")
     + (done.length ? `<button class="trk-history" data-act="history">${state.showHistory ? "Hide" : "Show"} ${done.length} finished flip${done.length > 1 ? "s" : ""}</button>` : "")
     + (state.showHistory ? done.slice(0, 50).map(row).join("") : "");
+}
+
+// Bar chart of realized profit per day for the last two weeks.
+function profitChart() {
+  const days = dailyProfit(state.tracker, { days: 14 });
+  if (!days.some((d) => d.flips)) return "";
+  const W = 560, H = 90, pad = 4, bw = (W - pad * 2) / days.length;
+  const max = Math.max(1, ...days.map((d) => Math.abs(d.profit)));
+  const mid = days.some((d) => d.profit < 0) ? H / 2 : H - 14;
+  const scale = (mid - 6) / max;
+  const bars = days.map((d, i) => {
+    const h = Math.max(d.flips ? 2 : 0, Math.abs(d.profit) * scale);
+    const y = d.profit >= 0 ? mid - h : mid;
+    const label = new Date(d.day).toLocaleDateString([], { month: "short", day: "numeric" });
+    return `<rect x="${pad + i * bw + 2}" y="${y}" width="${bw - 4}" height="${h}" rx="3" class="${d.profit >= 0 ? "up" : "down"}"><title>${label}: ${d.profit >= 0 ? "+" : "−"}${f.coins(Math.abs(d.profit))} from ${d.flips} flip${d.flips === 1 ? "" : "s"}</title></rect>`;
+  }).join("");
+  const first = new Date(days[0].day).toLocaleDateString([], { month: "short", day: "numeric" });
+  return `<div class="trk-chart"><span class="label">Profit per day · last 14 days</span><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Realized profit per day">${bars}<line x1="0" x2="${W}" y1="${mid}" y2="${mid}" class="axis"/></svg><div class="trk-chart-x"><span>${first}</span><span>today</span></div></div>`;
 }
 
 function trackerAction(btn) {
@@ -786,14 +829,30 @@ function craftSection(c) {
   </div>`;
 }
 
-function openDrawer(id, { keepScroll = false } = {}) {
+function priceAlertForm(r) {
+  const a = state.priceAlerts[r.id] || {};
+  return `<form class="price-alert" data-alert="${r.id}">
+    <span class="label">🔔 Price alert</span>
+    <label>Sell offers ≤ <input name="below" type="text" inputmode="decimal" placeholder="${f.price(r.bestAsk * 0.95)}" value="${a.below ?? ""}"></label>
+    <label>Buy orders ≥ <input name="above" type="text" inputmode="decimal" placeholder="${f.price(r.bestBid * 1.05)}" value="${a.above ?? ""}"></label>
+    <button class="btn sm" type="submit">${a.below || a.above ? "Update" : "Set alert"}</button>
+    ${a.below || a.above ? `<button class="btn sm ghost" type="button" data-clear-alert="${r.id}">Clear</button>` : ""}
+  </form>`;
+}
+
+function openDrawer(id, { keepScroll = false, keepDrafts = keepScroll } = {}) {
   const r = state.byId.get(id);
   if (!r) return;
+  const sameItem = state.openId === id;
   state.openId = id;
   const s = effectiveSettings();
   const series = seriesFor(id);
   const hs = historyStats(series, { tax: s.tax });
-  if (!state.refs.has(id)) ensureRefs([id]).then(() => { if (state.openId === id) openDrawer(id, { keepScroll: true }); });
+  // Fetch this item's 7-day history once; if it's already downloading, the batch
+  // that owns it re-renders the drawer when it lands.
+  if (!state.refs.has(id) && !state.refsInflight.has(id)) {
+    ensureRefs([id]).then(() => { if (state.openId === id && state.refs.has(id)) openDrawer(id, { keepScroll: true }); });
+  }
   const qty = r.orderQty;
   const craft = state.craftById.get(id);
   const fusionRes = state.fusionById.get(id);
@@ -819,6 +878,10 @@ function openDrawer(id, { keepScroll = false } = {}) {
   const watched = state.watch.has(id);
   const bzCmd = `/bz ${r.name}`;
 
+  // Live refreshes re-render the drawer; keep anything the user is typing.
+  const drafts = sameItem && keepDrafts
+    ? [...$("#drawer-body").querySelectorAll("input[name]")].map((el) => ({ name: el.name, value: el.value, focused: el === document.activeElement, sel: [el.selectionStart, el.selectionEnd] }))
+    : [];
   $("#drawer-body").innerHTML = `
     <div class="d-head">
       ${icon(r, "lg")}
@@ -848,6 +911,7 @@ function openDrawer(id, { keepScroll = false } = {}) {
     </div>
 
     <div class="d-section"><h3>How to flip it <span>budget ${f.coins(s.budget)}</span></h3>${steps}
+      ${priceAlertForm(r)}
       ${qty > 0 ? `<button class="btn btn-primary track-btn" data-track="${id}">Track this flip</button><div class="d-note">Press it after placing the buy order. “My flips” then warns you when you're outbid or undercut.</div>` : ""}</div>
     ${craft ? craftSection(craft) : ""}
     ${fusionRes ? fusionSection(fusionRes) : ""}
@@ -859,6 +923,12 @@ function openDrawer(id, { keepScroll = false } = {}) {
       <div class="d-note"><a href="https://sky.coflnet.com/item/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">Long-term price chart on Coflnet ↗</a></div>
     </div>`;
 
+  for (const d of drafts) {
+    const el = $("#drawer-body").querySelector(`input[name="${d.name}"]`);
+    if (!el) continue;
+    el.value = d.value;
+    if (d.focused) { el.focus({ preventScroll: true }); try { el.setSelectionRange(...d.sel); } catch { /* not a text input */ } }
+  }
   const drawer = $("#drawer");
   if (!keepScroll) drawer.scrollTop = 0;
   drawer.classList.add("open");
@@ -1014,7 +1084,7 @@ function bind() {
       const c = state.fusionById.get(tf.dataset.trackFusion);
       if (!c) return;
       state.tracker.unshift(newFusionEntry(c, { qty: Math.max(1, c.crafts || 1), tax: effectiveSettings().tax }));
-      if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+      askNotifications();
       saveTracker();
       return toast(`Tracking ${c.name} fusion`);
     }
@@ -1025,6 +1095,31 @@ function bind() {
       saveTracker();
       toast(`Tracking ${r.name}: ${f.int(r.orderQty)} @ ${f.price(r.buyAt)}`);
     }
+  });
+  $("#drawer").addEventListener("submit", (e) => {
+    const form = e.target.closest("[data-alert]");
+    if (!form) return;
+    e.preventDefault();
+    const num = (v) => { const n = f.parseCoins(v); return n > 0 ? n : undefined; };
+    const below = num(form.below.value), above = num(form.above.value);
+    const id = form.dataset.alert;
+    if (below || above) state.priceAlerts[id] = { below, above };
+    else delete state.priceAlerts[id];
+    store.set(LS.priceAlerts, state.priceAlerts);
+    askNotifications();
+    toast(below || above ? "Price alert saved" : "Price alert removed");
+    checkPriceAlertsNow();
+    openDrawer(id, { keepScroll: true, keepDrafts: false });
+    renderTable();
+  });
+  $("#drawer").addEventListener("click", (e) => {
+    const c = e.target.closest("[data-clear-alert]");
+    if (!c) return;
+    delete state.priceAlerts[c.dataset.clearAlert];
+    store.set(LS.priceAlerts, state.priceAlerts);
+    toast("Price alert removed");
+    openDrawer(c.dataset.clearAlert, { keepScroll: true, keepDrafts: false });
+    renderTable();
   });
   $("#tracker-body").addEventListener("click", (e) => {
     const c = e.target.closest("[data-copy]");
@@ -1086,6 +1181,32 @@ function bind() {
     state.alerted.clear();
     checkAlerts();
   });
+  $("#export-btn").addEventListener("click", () => {
+    const data = { app: "bz-flip", v: 1, exportedAt: new Date().toISOString() };
+    for (const k of BACKUP_KEYS) data[k] = store.get(LS[k], null);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+    const a = Object.assign(document.createElement("a"), { href: url, download: `bzflip-backup-${new Date().toISOString().slice(0, 10)}.json` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Backed up ${state.tracker.length} tracked flips, ${state.watch.size} starred items and your settings`);
+  });
+  $("#import-btn").addEventListener("click", () => $("#import-file").click());
+  $("#import-file").addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (data?.app !== "bz-flip") throw new Error("not a BZ Flip backup");
+      if (!confirm(`Restore the backup from ${data.exportedAt?.slice(0, 10) || "this file"}? It replaces your current tracked flips, watchlist, alerts and settings.`)) return;
+      for (const k of BACKUP_KEYS) if (data[k] != null) store.set(LS[k], data[k]);
+      location.reload();
+    } catch (err) {
+      toast(`Couldn't restore: ${err.message}`);
+    }
+  });
   $("#reset-btn").addEventListener("click", () => {
     state.settings = defaultSettings();
     state.nextAt = (state.fetchedAt || Date.now()) + state.settings.interval * 1000;
@@ -1115,6 +1236,28 @@ function bind() {
   });
   window.addEventListener("resize", () => { if (state.openId) renderPriceChart($("#chart"), seriesFor(state.openId)); });
 }
+
+// ---------- app install / offline ----------
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  $("#install-btn").hidden = false;
+});
+window.addEventListener("appinstalled", () => { $("#install-btn").hidden = true; toast("BZ Flip installed"); });
+$("#install-btn").addEventListener("click", async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice.catch(() => null);
+  installPrompt = null;
+  $("#install-btn").hidden = true;
+});
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  navigator.serviceWorker.register("sw.js").catch(() => { /* offline support is optional */ });
+}
+
+if (!store.get(LS.quickstart, false)) $("#quickstart").hidden = false;
+$("#qs-close").addEventListener("click", () => { $("#quickstart").hidden = true; store.set(LS.quickstart, true); });
 
 // ---------- boot ----------
 bind();

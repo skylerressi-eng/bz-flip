@@ -16,7 +16,10 @@ A fast, dependency-free website that scans **every product and craft on the Hypi
 - **Risk flags:** dead/lowball spreads, illiquid items, one-sided markets, crowded order books, price spikes against recent history (manipulation), and NPC price floors.
 - **Item panel:** step-by-step flip instructions with copy buttons (including the `/bz` command), fill-time estimates, the craft recipe, a price-history chart, and the top 10 levels of the order book.
 - **My flips tracker:** log the orders you placed (one click from any item, or “Track all” from the planner). Every refresh checks the live order book and tells you when you've been **outbid or undercut**, with the exact relist price (and a warning when relisting would go below break-even). It sends a browser notification, shows ⚠ in the tab title, and keeps your real profit for the last 24h and all time.
+- **Price alerts:** set “sell offers ≤ X” or “buy orders ≥ Y” on any item and get notified once each time the price crosses it.
 - **Watchlist alerts:** get a notification when a starred item's margin reaches your target.
+- **Profit per day chart** for your finished flips (last 14 days), plus **Back up / Restore** of tracked flips, watchlist, alerts and settings as a JSON file.
+- **Installable app (PWA):** “Install” / “Add to Home Screen” gives it its own window and icon. The app shell is cached so it opens instantly, and notifications go through the service worker, which Android requires.
 - 7-day sparklines, break-even and dump-loss prices, rank movement, real item icons, search, category filter, sortable columns, keyboard shortcuts (`/`, `R`, `1`–`8`, `Esc`), light/dark themes, and a mobile layout.
 
 ## API key?
@@ -66,6 +69,8 @@ The analysis lives in `assets/js/analysis.js` (pure functions, shared with the t
 
 ```
 index.html                 page shell
+manifest.webmanifest       app manifest (install / home-screen icon)
+sw.js                      service worker: offline shell, icon cache, notification clicks
 assets/css/styles.css      styles (dark and light themes)
 assets/js/analysis.js      flip + craft math, flags, rankings, planner, mayor effects
 assets/js/history.js       compact hourly price history

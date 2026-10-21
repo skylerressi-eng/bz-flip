@@ -47,7 +47,7 @@ jobs:
       - name: Build site
         run: |
           mkdir -p _site
-          cp -r index.html assets _site/
+          cp -r index.html sw.js manifest.webmanifest assets _site/
           touch _site/.nojekyll
 
       - name: Snapshot bazaar prices

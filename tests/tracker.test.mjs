@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { newEntry, newFusionEntry, repriceInput, trackStatus, trackerTotals, profitOf, unitsOf } from "../assets/js/tracker.js";
+import { newEntry, newFusionEntry, repriceInput, trackStatus, trackerTotals, profitOf, unitsOf, dailyProfit, checkPriceAlerts } from "../assets/js/tracker.js";
 
 const r = { id: "X", name: "Thing", buyAt: 100.1, sellAt: 119.9 };
 const tax = 0.0125;
@@ -58,4 +58,32 @@ test("fusion entries: watch every input, then the output", () => {
   const selling = { ...e, stage: "selling" };
   book.SHARD_O = { bestBid: 900, bestAsk: 950 };
   assert.equal(trackStatus(selling, (id) => book[id]).key, "undercut");
+});
+
+test("daily profit buckets finished flips by day", () => {
+  const now = new Date(2026, 9, 21, 15, 0).getTime();
+  const sold = (daysAgo, price) => ({ ...newEntry(r, { qty: 10, tax, now }), stage: "done", soldPrice: price, soldAt: now - daysAgo * 86400e3 });
+  const days = dailyProfit([sold(0, 120), sold(0, 120), sold(2, 90), sold(30, 200)], { days: 7, now });
+  assert.equal(days.length, 7);
+  const p = (120 * (1 - tax) - 100.1) * 10;
+  assert.ok(Math.abs(days[6].profit - 2 * p) < 1e-6);
+  assert.equal(days[6].flips, 2);
+  assert.ok(days[4].profit < 0); // sold at a loss two days ago
+  assert.equal(days.reduce((n, d) => n + d.flips, 0), 3); // 30 days ago is outside the window
+});
+
+test("price alerts fire once per crossing", () => {
+  const armed = new Set();
+  const alerts = { X: { below: 100, above: 150 } };
+  let book = { bestBid: 90, bestAsk: 110 };
+  assert.equal(checkPriceAlerts(alerts, () => book, armed).length, 0);
+  book = { bestBid: 90, bestAsk: 99 };
+  const f1 = checkPriceAlerts(alerts, () => book, armed);
+  assert.equal(f1.length, 1);
+  assert.equal(f1[0].kind, "below");
+  assert.equal(checkPriceAlerts(alerts, () => book, armed).length, 0); // no repeat
+  book = { bestBid: 90, bestAsk: 105 };
+  checkPriceAlerts(alerts, () => book, armed); // re-arms
+  book = { bestBid: 151, bestAsk: 98 };
+  assert.deepEqual(checkPriceAlerts(alerts, () => book, armed).map((x) => x.kind).sort(), ["above", "below"]);
 });

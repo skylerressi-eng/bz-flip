@@ -62,6 +62,7 @@
 
 /* ---------- base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; } /* component display rules must never un-hide */
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -383,6 +384,26 @@ code { font: 500 12.5px var(--mono); }
 .trk-history:hover { color: var(--text); }
 .track-btn { margin-top: 10px; width: 100%; }
 
+/* ---------- quick start / alerts / backup ---------- */
+.quickstart { display: flex; gap: 16px; align-items: center; padding: 14px 16px; margin-bottom: 18px; border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); }
+.qs-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; flex: 1; }
+.qs-steps > div { display: flex; gap: 10px; font-size: 13.5px; color: var(--muted); line-height: 1.45; }
+.qs-steps b { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--gold); color: var(--gold-ink); font: 700 12px var(--mono); }
+.qs-steps strong { color: var(--text); }
+.btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn-row .btn { flex: 1; padding: 0 10px; }
+.bell { font-size: 12px; }
+.price-alert { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 10px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; font-size: 13px; color: var(--muted); }
+.price-alert .label { width: 100%; }
+.price-alert label { display: flex; align-items: center; gap: 6px; }
+.price-alert input { width: 110px; height: 30px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--bg-2); font: 500 12.5px var(--mono); }
+.trk-chart { padding: 12px 16px 6px; border-bottom: 1px solid var(--line); }
+.trk-chart svg { width: 100%; height: 90px; display: block; margin-top: 6px; stroke-width: 1; }
+.trk-chart rect.up { fill: var(--green); opacity: 0.85; }
+.trk-chart rect.down { fill: var(--red); opacity: 0.85; }
+.trk-chart .axis { stroke: var(--line-2); }
+.trk-chart-x { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); }
+
 /* ---------- craft drawer ---------- */
 .recipe table { width: 100%; border-collapse: collapse; font: 500 12.5px var(--mono); background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .recipe th { font: 700 11px Inter, sans-serif; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); padding: 8px; text-align: right; border-bottom: 1px solid var(--line); }
@@ -444,6 +465,10 @@ code { font: 500 12.5px var(--mono); }
   .plan-table td.c-item { padding-right: 0; }
   .craft-modes > div { grid-template-columns: 1fr auto; }
   .trk { grid-template-columns: 1fr auto; }
+  .quickstart { flex-direction: column; align-items: stretch; }
+  .qs-steps { grid-template-columns: 1fr; gap: 10px; }
+  #install-btn span { display: none; }
+  #install-btn { width: 38px; padding: 0; }
   .trk-status, .trk-actions { grid-column: 1 / -1; }
   .trk-actions { justify-content: flex-start; }
   .tracker-totals { gap: 16px; }

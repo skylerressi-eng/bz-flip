@@ -116,3 +116,45 @@ function signed(n) {
   const s = a >= 1e9 ? `${(a / 1e9).toFixed(2)}B` : a >= 1e6 ? `${(a / 1e6).toFixed(2)}M` : a >= 1e4 ? `${(a / 1e3).toFixed(1)}k` : Math.round(a).toLocaleString("en-US");
   return `${n < 0 ? "−" : "+"}${s}`;
 }
+
+// Realized profit per calendar day (local time) for the last `days` days, oldest first.
+export function dailyProfit(entries, { days = 14, now = Date.now() } = {}) {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - (days - 1));
+  const out = Array.from({ length: days }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    return { day: d.getTime(), profit: 0, flips: 0 };
+  });
+  for (const e of entries) {
+    if (e.stage !== "done" || !e.soldAt || e.soldAt < start.getTime()) continue;
+    const d = new Date(e.soldAt);
+    d.setHours(0, 0, 0, 0);
+    const slot = out.find((o) => o.day === d.getTime());
+    if (slot) { slot.profit += profitOf(e); slot.flips++; }
+  }
+  return out;
+}
+
+// Price alerts: { [id]: { below?: number, above?: number } } on the lowest sell
+// offer (what you'd pay to insta-buy) and the highest buy order (what you'd get
+// insta-selling). Fires once per crossing: `armed` remembers which alerts are
+// currently triggered so they don't repeat until the price moves back.
+export function checkPriceAlerts(alerts, lookup, armed) {
+  const fired = [];
+  for (const [id, a] of Object.entries(alerts)) {
+    const t = lookup(id);
+    if (!t) continue;
+    const checks = [
+      ["below", a.below > 0 && t.bestAsk <= a.below, `sell offers dropped to ${fmt(t.bestAsk)} (your alert: ≤ ${fmt(a.below || 0)})`],
+      ["above", a.above > 0 && t.bestBid >= a.above, `buy orders rose to ${fmt(t.bestBid)} (your alert: ≥ ${fmt(a.above || 0)})`],
+    ];
+    for (const [kind, hit, text] of checks) {
+      const k = `${id}:${kind}`;
+      if (hit && !armed.has(k)) { armed.add(k); fired.push({ id, kind, text }); }
+      else if (!hit) armed.delete(k);
+    }
+  }
+  return fired;
+}
