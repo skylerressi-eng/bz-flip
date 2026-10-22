@@ -2,7 +2,7 @@
 // - The app shell is served stale-while-revalidate (instant load, updates next visit);
 //   the page itself is network-first so a new deploy shows up immediately when online.
 // - Live data (Hypixel, Coflnet history) always goes to the network; only item icons are cached.
-const VERSION = "v1";
+const VERSION = "v2"; // bump on every asset change so installed PWAs pick up new code
 const SHELL = `bzflip-shell-${VERSION}`;
 const ICONS = "bzflip-icons";
 const SHELL_FILES = [
