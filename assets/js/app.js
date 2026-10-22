@@ -1,4 +1,4 @@
-import { analyzeAll, analyzeCrafts, analyzeFusions, planFlips, mayorEffects, rank, buildMeta, RANKINGS, DEFAULT_SETTINGS, TARGET_FILL_HRS, historyStats } from "./analysis.js";
+import { analyzeAll, analyzeCrafts, analyzeFusions, shardCosts, fusionPlan, planFlips, mayorEffects, rank, buildMeta, RANKINGS, DEFAULT_SETTINGS, TARGET_FILL_HRS, historyStats } from "./analysis.js";
 import { appendSnapshot, mergedSeries, isHistory, trim, EMPTY_HISTORY } from "./history.js";
 import * as f from "./format.js";
 import { renderPriceChart, sparkline } from "./chart.js";
@@ -279,7 +279,8 @@ function compute() {
   state.byId = new Map(state.results.map((r) => [r.id, r]));
   state.crafts = state.recipes ? analyzeCrafts(state.bazaar, state.recipes, s, state.meta) : [];
   state.craftById = new Map(state.crafts.map((c) => [c.id, c]));
-  state.fusions = state.fusionData ? analyzeFusions(state.bazaar, state.fusionData, s, state.meta) : [];
+  state.shardCosts = state.fusionData ? shardCosts(state.fusionData, state.bazaar, { crocodileLevel: s.crocodileLevel || 0, minFlow: s.minFlow }) : null;
+  state.fusions = state.fusionData ? analyzeFusions(state.bazaar, state.fusionData, s, state.meta, { costs: state.shardCosts }) : [];
   state.fusionById = new Map(state.fusions.map((c) => [c.id, c]));
   const ranks = {};
   for (const key of Object.keys(RANKINGS)) {
@@ -500,7 +501,7 @@ const COLS = {
   ],
   fusion: [
     rankCol,
-    { label: "Shard", cls: "c-item", cell: (r) => itemCell({ ...r, category: r.shard ? cap(r.shard.rarity) : "Shard" }, `${shardTag(r)} · ×${+r.count.toFixed(2)}`) },
+    { label: "Shard", cls: "c-item", cell: (r) => itemCell({ ...r, category: r.shard ? cap(r.shard.rarity) : "Shard" }, `${shardTag(r)} · ×${+r.count.toFixed(2)}${r.chain ? ` · <span class="chain-chip" title="Fusing up from cheaper shards costs ${f.coins(r.chain.unitCost)} each instead of ${f.coins(r.chain.directUnit)}. Open it for the full route.">⛓ ${r.chain.depth}-step −${f.pct(r.chain.savingsPct, 0)}</span>` : ""}`) },
     { label: "Inputs", key: "cost", num: true, title: "Cost of one fusion using buy orders on both input shards", cell: (r) => { const t = ingredientsText(r); return `<span class="price">${f.coins(r.cost)}</span><span class="price-sub" title="${f.esc(t.full)}">${f.esc(t.short)}</span>`; } },
     { label: "Sells for", key: "revenue", num: true, title: "Sell offer on the output shards, after tax", cell: (r) => `<span class="price">${f.coins(r.revenue)}</span><span class="price-sub">offer ${f.coins(r.sellAt)}</span>` },
     { label: "Profit/fuse", key: "margin", num: true, cell: (r) => marginHtml(r.margin, r.marginPct) },
@@ -795,13 +796,18 @@ function trackerAction(btn) {
 // ---------- drawer ----------
 function fusionSection(c) {
   const signed = (v) => `<b class="${v > 0 ? "pos" : "neg"}">${v > 0 ? "+" : ""}${f.coins(v)}</b>`;
-  const rows = c.inputs.map((i) => `<tr data-goto="${i.id}" title="Open ${f.esc(i.name)}"><td><span class="ing">${icon({ id: i.id, name: i.name, category: "Shards" }, "xs")}${f.esc(i.name)}</span></td><td>${f.int(i.qty)}</td><td>${f.price(i.orderPrice)}</td><td>${f.coins(i.orderPrice * i.qty)}</td><td>${f.rate(i.instaSellsHr)}</td></tr>`).join("");
-  const alts = (c.alts || []).slice(1).map((a) => `<tr><td>${f.esc(a.inputs.map((i) => `${i.qty}× ${i.name.replace(/ Shard$/, "")}`).join(" + "))}</td><td>${+a.count.toFixed(2)}</td><td>${f.coins(a.cost)}</td><td class="${a.margin > 0 ? "pos" : "neg"}">${a.margin > 0 ? "+" : ""}${f.coins(a.margin)}</td><td>${f.coins(a.profitHr)}</td></tr>`).join("");
   const qty = Math.max(1, c.crafts || 1);
+  const shardName = (n) => f.esc(n.replace(/ Shard$/, ""));
+  // Per fuse AND for the whole batch, since "how many do I actually buy?" is the
+  // first thing you need before placing orders.
+  const rows = c.inputs.map((i) => `<tr data-goto="${i.id}" title="Open ${f.esc(i.name)}"><td><span class="ing">${icon({ id: i.id, name: i.name, category: "Shards" }, "xs")}${f.esc(i.name)}</span></td><td>${f.int(i.qty)}</td><td><b>${f.int(i.qty * qty)}</b></td><td>${f.price(i.orderPrice)}</td><td>${f.coins(i.orderPrice * i.qty * qty)}</td><td>${f.rate(i.instaSellsHr)}</td></tr>`).join("");
+  const alts = (c.alts || []).slice(1).map((a) => `<tr><td>${f.esc(a.inputs.map((i) => `${i.qty}× ${i.name.replace(/ Shard$/, "")}`).join(" + "))}</td><td>${+a.count.toFixed(2)}</td><td>${f.coins(a.cost)}</td><td class="${a.margin > 0 ? "pos" : "neg"}">${a.margin > 0 ? "+" : ""}${f.coins(a.margin)}</td><td>${f.coins(a.profitHr)}</td></tr>`).join("");
+  const totalCost = c.cost * qty;
   return `<div class="d-section"><h3>Fuse it <span>${c.shard ? `${f.esc(c.shard.rarity)} · ${f.esc(c.shard.family)} · ${f.esc(c.shard.type)}` : ""}</span></h3>
     <div class="recipe"><table>
-      <thead><tr><th>Input shard</th><th>Per fuse</th><th>Buy order</th><th>Total</th><th>Sells/hr</th></tr></thead>
+      <thead><tr><th>Input shard</th><th>Per fuse</th><th>Buy ${f.int(qty)}×</th><th>Buy order</th><th>Total</th><th>Sells/hr</th></tr></thead>
       <tbody>${rows}</tbody>
+      <tfoot><tr><td>${f.int(qty)} fusions → <b>${f.int(Math.floor(c.count * qty))}× ${shardName(c.name)}</b></td><td></td><td></td><td></td><td><b>${f.coins(totalCost)}</b></td><td></td></tr></tfoot>
     </table></div>
     <div class="craft-modes">
       <div><span class="label">Patient · buy orders → fuse → sell offer</span><span>${f.coins(c.cost)} → ${f.coins(c.revenue)} (makes ${+c.count.toFixed(2)})</span>${signed(c.margin)}</div>
@@ -810,6 +816,34 @@ function fusionSection(c) {
     <button class="btn btn-primary track-btn" data-track-fusion="${c.id}">Track this fusion (${f.int(qty)} fusions)</button>
     <div class="d-note">Place buy orders for ${c.inputs.map((i) => `<b>${f.int(i.qty * qty)}× ${f.esc(i.name)}</b>`).join(" and ")}, then press track. “My flips” watches both inputs for outbids, then your shard sell offer for undercuts.${c.reptile ? " Includes your Crocodile bonus for Reptile inputs." : ""}</div>
     ${alts ? `<div class="recipe" style="margin-top:10px"><table><thead><tr><th>Other recipes</th><th>Makes</th><th>Cost</th><th>Profit</th><th>/hr</th></tr></thead><tbody>${alts}</tbody></table></div>` : ""}
+  </div>${chainSection(c, qty)}`;
+}
+
+// Multi-step route: when the cheapest way to get this shard is to fuse its
+// inputs too (and theirs), show the whole ladder bottom-up, the shards you
+// actually buy, and how long the slowest buy order will take — a deep chain can
+// look nearly free while being unfillable.
+function chainSection(c, batch) {
+  if (!c.chain || !c.code || !state.fusionData || !state.shardCosts) return "";
+  const units = Math.max(1, Math.floor((c.count || 1) * batch));
+  const plan = fusionPlan(state.fusionData, state.bazaar, c.code, {
+    units, costs: state.shardCosts, crocodileLevel: effectiveSettings().crocodileLevel || 0, minFlow: effectiveSettings().minFlow,
+  });
+  if (!plan?.ok || !plan.steps.length) return "";
+  const shardName = (n) => f.esc(n.replace(/ Shard$/, ""));
+  const buys = plan.buy.map((b) => `<tr data-goto="${b.id}" title="Open ${f.esc(b.name)}"><td><span class="ing">${icon({ id: b.id, name: b.name, category: "Shards" }, "xs")}${f.esc(b.name)}</span></td><td><b>${f.int(b.qty)}</b></td><td>${f.price(b.unitPrice)}</td><td>${f.coins(b.cost)}</td><td>${Number.isFinite(b.hoursToFill) ? f.duration(b.hoursToFill) : "–"}</td></tr>`).join("");
+  const steps = plan.steps.map((s, i) => `<li><span class="step-n">${i + 1}</span>${s.inputs.map((x) => `<b>${f.int(x.qty)}×</b> ${shardName(x.name)}${x.fused ? ` <span class="muted">(from step ${plan.steps.findIndex((y) => y.code === x.code) + 1})</span>` : ""}`).join(" + ")} → ${f.int(s.fuses)} fuse${s.fuses === 1 ? "" : "s"} → <b>${f.int(Math.floor(s.makes))}× ${shardName(s.name)}</b></li>`).join("");
+  const direct = c.chain.directUnit * units;
+  const slow = plan.hoursToFill > 12 || !Number.isFinite(plan.hoursToFill);
+  return `<div class="d-section"><h3>Multi-step route <span>${plan.depth} steps deep · saves ${f.pct(c.chain.savingsPct)}</span></h3>
+    <div class="d-note">Buying both inputs outright costs <b>${f.coins(direct)}</b> for ${f.int(units)}× ${shardName(c.name)}. Fusing up from cheaper shards instead costs <b class="pos">${f.coins(plan.cost)}</b> — a saving of <b class="pos">${f.coins(direct - plan.cost)}</b>, in ${f.int(plan.fuses)} fuses.</div>
+    <ol class="chain">${steps}</ol>
+    <div class="recipe"><table>
+      <thead><tr><th>Shards to buy</th><th>Qty</th><th>Buy order</th><th>Cost</th><th>Fills in</th></tr></thead>
+      <tbody>${buys}</tbody>
+      <tfoot><tr><td>Total</td><td></td><td></td><td><b>${f.coins(plan.cost)}</b></td><td class="${slow ? "neg" : ""}">${Number.isFinite(plan.hoursToFill) ? f.duration(plan.hoursToFill) : "never"}</td></tr></tfoot>
+    </table></div>
+    <div class="d-note">${slow ? `<b class="neg">Slow:</b> the biggest order needs ${Number.isFinite(plan.hoursToFill) ? f.duration(plan.hoursToFill) : "forever"} to fill at current volume, so treat this saving as theoretical.` : `Each extra step adds its own order wait, so the saving is real but slower than a single fuse. Fuse amounts already include your Crocodile level.`}</div>
   </div>`;
 }
 

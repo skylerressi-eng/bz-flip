@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeProduct, analyzeAll, analyzeCrafts, analyzeFusions, planFlips, mayorEffects, shareOf, rank, prettyId, buildMeta, DEFAULT_SETTINGS } from "../assets/js/analysis.js";
+import { analyzeProduct, analyzeAll, analyzeCrafts, analyzeFusions, shardCosts, fusionPlan, planFlips, mayorEffects, shareOf, rank, prettyId, buildMeta, DEFAULT_SETTINGS } from "../assets/js/analysis.js";
 import { appendSnapshot, seriesFor, mergedSeries, EMPTY_HISTORY } from "../assets/js/history.js";
 
 // bid = best buy order (sell_summary), ask = best sell offer (buy_summary)
@@ -213,4 +213,95 @@ test("fusion: fuse amounts, output qty, crocodile bonus for reptiles", () => {
   near(croc.count, 2 * 1.2);
   assert.ok(croc.margin > f.margin);
   assert.equal(f.shard.rarity, "rare");
+});
+
+// A ladder: L -> M -> H, where buying H outright is far dearer than fusing it,
+// and the recipe graph deliberately contains a cycle (H fuses back into L).
+const ladder = {
+  shards: {
+    L: { id: "SHARD_L", name: "Low", rarity: "common", family: "Bug", type: "Global", fuse: 2 },
+    M: { id: "SHARD_M", name: "Mid", rarity: "uncommon", family: "Bug", type: "Global", fuse: 2 },
+    H: { id: "SHARD_H", name: "High", rarity: "rare", family: "Bug", type: "Global", fuse: 2 },
+  },
+  recipes: {
+    M: { "1": "L,L" },
+    H: { "1": "M,M" },
+    L: { "1": "H,H" }, // cycle back to the bottom
+  },
+};
+const liquid = (p) => product({ ...p, instaSellWeek: 1e6, instaBuyWeek: 1e6 });
+
+test("shardCosts: fuses up a ladder and never loops on a cyclic recipe graph", () => {
+  const bz = { products: {
+    SHARD_L: liquid({ bid: 10, ask: 11 }),
+    SHARD_M: liquid({ bid: 100, ask: 110 }),
+    SHARD_H: liquid({ bid: 9000, ask: 9500 }),
+  } };
+  const costs = shardCosts(ladder, bz, {});
+  assert.equal(costs.get("L").depth, 0);            // cheapest bought
+  assert.equal(costs.get("L").via, null);
+  // "L,L" puts L in BOTH slots, so one fuse eats fuse(L) twice = 4x L.
+  // M: 4 * 10.1 = 40.4, which beats buying M at 100.1.
+  near(costs.get("M").cost, 4 * 10.1);
+  assert.equal(costs.get("M").depth, 1);
+  // H: 4x M = 4 * 40.4 = 161.6, two steps down and far under the 9000 ask.
+  near(costs.get("H").cost, 16 * 10.1);
+  assert.equal(costs.get("H").depth, 2);
+  assert.equal(costs.get("H").via.a, "M");
+});
+
+test("shardCosts: ignores leaves too illiquid to actually buy", () => {
+  const bz = { products: {
+    SHARD_L: product({ bid: 10, ask: 11, instaSellWeek: 10, instaBuyWeek: 10 }), // ~0.06/hr
+    SHARD_M: liquid({ bid: 100, ask: 110 }),
+    SHARD_H: liquid({ bid: 9000, ask: 9500 }),
+  } };
+  const costs = shardCosts(ladder, bz, { minFlow: 5 });
+  near(costs.get("M").cost, 100.1);         // L unbuyable, so M falls back to buying
+  assert.equal(costs.get("M").via, null);
+  near(costs.get("H").cost, 4 * 100.1);     // and H fuses from bought M
+  // L is no longer purchasable, so the only way to it is back round the cycle
+  // (H,H -> L). It is reached, priced from already-settled shards, and does not
+  // loop -- which is the cycle guarantee the settle order buys us.
+  assert.equal(costs.get("L").via.a, "H");
+  near(costs.get("L").cost, 4 * 400.4);
+});
+
+test("fusionPlan: aggregates quantities, rounds up to whole fuses, lists buys", () => {
+  const bz = { products: {
+    SHARD_L: liquid({ bid: 10, ask: 11 }),
+    SHARD_M: liquid({ bid: 100, ask: 110 }),
+    SHARD_H: liquid({ bid: 9000, ask: 9500 }),
+  } };
+  const plan = fusionPlan(ladder, bz, "H", { units: 3 });
+  assert.equal(plan.ok, true);
+  assert.equal(plan.depth, 2);
+  // 3x H needs 3 fuses -> 12x M -> 12 fuses -> 48x L, all bought at the bottom.
+  assert.equal(plan.buy.length, 1);
+  assert.equal(plan.buy[0].id, "SHARD_L");
+  assert.equal(plan.buy[0].qty, 48);
+  near(plan.cost, 48 * 10.1);
+  assert.equal(plan.fuses, 15);
+  // Deepest fuse comes first: the order you actually perform them.
+  assert.equal(plan.steps[0].code, "M");
+  assert.equal(plan.steps.at(-1).code, "H");
+  assert.equal(plan.steps[0].inputs[0].qty, 48);
+  assert.ok(plan.hoursToFill > 0 && Number.isFinite(plan.hoursToFill));
+});
+
+test("analyzeFusions: flags a shard whose multi-step route beats buying inputs", () => {
+  const bz = { products: {
+    SHARD_L: liquid({ bid: 10, ask: 11 }),
+    SHARD_M: liquid({ bid: 100, ask: 110 }),
+    SHARD_H: liquid({ bid: 9000, ask: 9500 }),
+  } };
+  const rows = analyzeFusions(bz, ladder, { ...DEFAULT_SETTINGS, budget: 1e9 });
+  const h = rows.find((r) => r.id === "SHARD_H");
+  assert.ok(h.chain, "expected a chain on H");
+  assert.equal(h.chain.depth, 2);
+  near(h.chain.unitCost, 16 * 10.1);
+  assert.ok(h.chain.unitCost < h.chain.directUnit);
+  assert.ok(h.chain.savingsPct > 0.5);
+  // M is one fuse from bought shards, so it is not a multi-step chain.
+  assert.equal(rows.find((r) => r.id === "SHARD_M").chain, null);
 });

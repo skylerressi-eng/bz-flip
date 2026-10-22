@@ -535,18 +535,246 @@ export function fusionRecipes(fusionData, bazaar, { crocodileLevel = 0, keep = 4
   return recipes;
 }
 
-export function analyzeFusions(bazaar, fusionData, settings = DEFAULT_SETTINGS, metaById = {}) {
+export function analyzeFusions(bazaar, fusionData, settings = DEFAULT_SETTINGS, metaById = {}, { costs = null } = {}) {
+  const { tax } = { ...DEFAULT_SETTINGS, ...settings };
   const recipes = fusionRecipes(fusionData, bazaar, { crocodileLevel: settings.crocodileLevel || 0 });
   const byId = {};
-  for (const s of Object.values(fusionData?.shards || {})) byId[s.id] = s;
+  const codeById = {};
+  for (const [code, s] of Object.entries(fusionData?.shards || {})) { byId[s.id] = s; codeById[s.id] = code; }
   const named = (id) => metaById[id] || (byId[id] ? { name: `${byId[id].name} Shard`, category: "Shards" } : {});
   const meta = new Proxy({}, { get: (_, id) => named(id) });
   const out = analyzeCrafts(bazaar, { recipes }, settings, meta, { kind: "fusion" });
+  // Cheapest route to each shard at any depth, so a row can say whether a
+  // multi-step chain beats buying both inputs outright.
+  const solved = costs || shardCosts(fusionData, bazaar, { crocodileLevel: settings.crocodileLevel || 0, minFlow: settings.minFlow });
   for (const r of out) {
     r.shard = byId[r.id] || null;
     r.category = "Shards";
     if (r.shard) r.tier = r.shard.rarity.toUpperCase(); // colours the icon by rarity
     r.reptile = !!r.pair?.some((c) => fusionData.shards[c]?.family.includes("Reptile"));
+    r.code = codeById[r.id] || null;
+    const route = r.code ? solved.get(r.code) : null;
+    const directUnit = r.cost / (r.count || 1);
+    // Only worth surfacing if the route is both deeper than a single fuse and
+    // meaningfully cheaper; a sub-2% saving is noise against moving prices.
+    if (route?.via && route.depth > 1 && route.cost < directUnit * 0.98) {
+      const revenueUnit = r.sellAt * (1 - tax);
+      r.chain = {
+        depth: route.depth,
+        unitCost: route.cost,
+        directUnit,
+        savingsPerUnit: directUnit - route.cost,
+        savingsPct: (directUnit - route.cost) / directUnit,
+        marginPerUnit: revenueUnit - route.cost,
+        pair: [route.via.a, route.via.b],
+      };
+    } else r.chain = null;
   }
   return out;
+}
+
+// ---- multi-step fusion chains ---------------------------------------------
+// Buying a shard outright is often dearer than buying two lesser shards and
+// fusing them — and those lesser shards may themselves be worth fusing, so the
+// cheapest route can be several steps deep ("these into this, those into that,
+// then both into the target").
+//
+// Finding it is a shortest-path problem on a hypergraph: every recipe is an edge
+// with TWO tails, so an ordinary Dijkstra does not apply. This is Dijkstra
+// generalised to such edges (Knuth's variant): repeatedly settle the cheapest
+// unsettled shard, and relax a recipe only once BOTH of its inputs are settled.
+// Every fuse amount is positive, so a shard's cost never falls below one already
+// settled — which makes a settled cost final and, crucially, makes the chosen
+// routes acyclic even though the recipe graph has cycles (A fuses into B and B
+// back into A). Bounding depth is therefore unnecessary.
+
+class MinHeap {
+  constructor() { this.c = []; this.k = []; }
+  get size() { return this.k.length; }
+  push(cost, key) {
+    const { c, k } = this;
+    let i = k.length;
+    c.push(cost); k.push(key);
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (c[p] <= c[i]) break;
+      [c[p], c[i]] = [c[i], c[p]]; [k[p], k[i]] = [k[i], k[p]];
+      i = p;
+    }
+  }
+  pop() {
+    const { c, k } = this;
+    const key = k[0], cost = c[0], last = k.length - 1;
+    c[0] = c[last]; k[0] = k[last]; c.pop(); k.pop();
+    let i = 0;
+    for (;;) {
+      const l = 2 * i + 1, r = l + 1;
+      let m = i;
+      if (l < k.length && c[l] < c[m]) m = l;
+      if (r < k.length && c[r] < c[m]) m = r;
+      if (m === i) break;
+      [c[m], c[i]] = [c[i], c[m]]; [k[m], k[i]] = [k[i], k[m]];
+      i = m;
+    }
+    return { cost, key };
+  }
+}
+
+// Flattened recipe list plus a reverse index, built once per fusion dataset
+// (131k recipes, so this must not be rebuilt on every refresh).
+const fusionIndex = new WeakMap();
+function indexFusions(fusionData) {
+  if (fusionIndex.has(fusionData)) return fusionIndex.get(fusionData);
+  const edges = [];
+  const usedBy = new Map();
+  for (const { code, pairs } of parseFusions(fusionData)) {
+    for (const p of pairs) {
+      const i = edges.length;
+      edges.push({ out: code, a: p.a, b: p.b, qty: p.qty });
+      for (const side of p.a === p.b ? [p.a] : [p.a, p.b]) {
+        const list = usedBy.get(side);
+        if (list) list.push(i); else usedBy.set(side, [i]);
+      }
+    }
+  }
+  const built = { edges, usedBy };
+  fusionIndex.set(fusionData, built);
+  return built;
+}
+
+// Cheapest cost to obtain ONE of each shard, by buying it or by fusing.
+// Returns Map code -> { cost, via, depth }; `via` is null when buying is best.
+export function shardCosts(fusionData, bazaar, { crocodileLevel = 0, mode = "order", minFlow = DEFAULT_SETTINGS.minFlow } = {}) {
+  const S = fusionData?.shards || {};
+  const P = bazaar?.products || {};
+  const croc = 1 + 0.02 * clamp(crocodileLevel, 0, 10);
+  const { edges, usedBy } = indexFusions(fusionData);
+  // A chain is only real if you can actually buy its leaves. Dust shards trade a
+  // few per hour, so a route needing thousands of them looks almost free and can
+  // never be filled; treating them as unbuyable keeps routes honest.
+  const marketCost = (code) => {
+    const p = P[S[code]?.id];
+    if (!p) return Infinity;
+    const q = p.quick_status || {};
+    const flow = (mode === "instant" ? q.buyMovingWeek : q.sellMovingWeek) || 0;
+    if (flow / HOURS_PER_WEEK < minFlow) return Infinity;
+    if (mode === "instant") return p.buy_summary?.[0]?.pricePerUnit || Infinity;
+    const bid = p.sell_summary?.[0]?.pricePerUnit;
+    return bid ? round1(bid + TICK) : Infinity;
+  };
+  const best = new Map();
+  const settled = new Set();
+  const heap = new MinHeap();
+  for (const code of Object.keys(S)) {
+    const c = marketCost(code);
+    if (Number.isFinite(c)) {
+      best.set(code, { cost: c, via: null, depth: 0 });
+      heap.push(c, code);
+    }
+  }
+  // Inputs of each recipe still unsettled; at 0 the recipe can be relaxed.
+  const waiting = new Uint8Array(edges.length);
+  for (let i = 0; i < edges.length; i++) waiting[i] = edges[i].a === edges[i].b ? 1 : 2;
+  while (heap.size) {
+    const { key: code } = heap.pop();
+    if (settled.has(code)) continue; // stale heap entry
+    settled.add(code);
+    for (const ei of usedBy.get(code) || []) {
+      if (--waiting[ei] > 0) continue;
+      const e = edges[ei];
+      if (settled.has(e.out)) continue; // already final, cannot improve
+      const A = S[e.a], B = S[e.b];
+      if (!A || !B) continue;
+      const ca = best.get(e.a), cb = best.get(e.b);
+      if (!ca || !cb) continue;
+      const out = e.qty * (A.family.includes("Reptile") || B.family.includes("Reptile") ? croc : 1);
+      if (!(out > 0)) continue;
+      const cost = (A.fuse * ca.cost + B.fuse * cb.cost) / out;
+      const cur = best.get(e.out);
+      if (!cur || cost < cur.cost - 1e-9) {
+        best.set(e.out, {
+          cost, depth: Math.max(ca.depth, cb.depth) + 1,
+          via: { a: e.a, b: e.b, out, fuseA: A.fuse, fuseB: B.fuse },
+        });
+        heap.push(cost, e.out);
+      }
+    }
+  }
+  return best;
+}
+
+// Turn the cheapest route for `code` into a shopping list and an ordered list of
+// fuse steps. Quantities are aggregated across the whole tree BEFORE rounding up
+// to whole fuses, so a shard feeding two different steps is only bought once.
+export function fusionPlan(fusionData, bazaar, code, { units = 1, crocodileLevel = 0, costs = null, mode = "order", minFlow = DEFAULT_SETTINGS.minFlow } = {}) {
+  const S = fusionData?.shards || {};
+  const P = bazaar?.products || {};
+  const solved = costs || shardCosts(fusionData, bazaar, { crocodileLevel, mode, minFlow });
+  const root = solved.get(code);
+  if (!root) return null;
+  const nameOf = (c) => `${S[c]?.name || c} Shard`;
+  const priceOf = (c) => {
+    const p = P[S[c]?.id];
+    if (!p) return Infinity;
+    if (mode === "instant") return p.buy_summary?.[0]?.pricePerUnit || Infinity;
+    const bid = p.sell_summary?.[0]?.pricePerUnit;
+    return bid ? round1(bid + TICK) : Infinity;
+  };
+
+  // Topological order of the route (parents before the inputs they consume).
+  const order = [];
+  const seen = new Set();
+  (function visit(c) {
+    if (seen.has(c)) return;
+    seen.add(c);
+    const via = solved.get(c)?.via;
+    if (via) { visit(via.a); visit(via.b); }
+    order.push(c); // children first, so reverse gives parents first
+  })(code);
+  order.reverse();
+
+  const need = new Map([[code, units]]);
+  const steps = [];
+  const buy = new Map();
+  for (const c of order) {
+    const want = need.get(c) || 0;
+    if (want <= 0) continue;
+    const via = solved.get(c)?.via;
+    if (!via) {
+      const qty = Math.ceil(want - 1e-9);
+      const unitPrice = priceOf(c);
+      buy.set(c, { code: c, id: S[c]?.id, name: nameOf(c), qty, unitPrice, cost: qty * unitPrice });
+      continue;
+    }
+    const fuses = Math.ceil(want / via.out - 1e-9);
+    const inputs = [{ code: via.a, qty: fuses * via.fuseA }];
+    if (via.b === via.a) inputs[0].qty += fuses * via.fuseB;
+    else inputs.push({ code: via.b, qty: fuses * via.fuseB });
+    for (const i of inputs) need.set(i.code, (need.get(i.code) || 0) + i.qty);
+    steps.push({
+      code: c, id: S[c]?.id, name: nameOf(c), fuses,
+      makes: fuses * via.out, wanted: want,
+      inputs: inputs.map((i) => ({ ...i, id: S[i.code]?.id, name: nameOf(i.code), fused: !!solved.get(i.code)?.via })),
+    });
+  }
+  steps.reverse(); // deepest fuses first: the order you actually perform them
+
+  const list = [...buy.values()].sort((a, b) => b.cost - a.cost);
+  const cost = list.reduce((s, b) => s + b.cost, 0);
+  // Every leg is bought in parallel, so the buy side takes as long as the slowest
+  // leaf. This is the number that decides whether a deep chain is worth doing.
+  for (const b of list) {
+    const week = P[b.id]?.quick_status?.[mode === "instant" ? "buyMovingWeek" : "sellMovingWeek"] || 0;
+    b.flowHr = week / HOURS_PER_WEEK;
+    b.hoursToFill = b.flowHr > 0 ? b.qty / b.flowHr : Infinity;
+  }
+  const hoursToFill = list.length ? Math.max(...list.map((b) => b.hoursToFill)) : Infinity;
+  return {
+    code, id: S[code]?.id, units,
+    cost, unitCost: root.cost, depth: root.depth,
+    steps, buy: list,
+    fuses: steps.reduce((s, x) => s + x.fuses, 0),
+    hoursToFill,
+    ok: Number.isFinite(cost) && list.length > 0,
+  };
 }

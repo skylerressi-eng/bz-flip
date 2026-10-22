@@ -482,3 +482,9 @@ code { font: 500 12.5px var(--mono); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* multi-step fusion route */
+.chain-chip { background: var(--green-bg); color: var(--green); border-radius: 4px; padding: 0 4px; font-weight: 600; white-space: nowrap; }
+ol.chain { list-style: none; margin: 10px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+ol.chain li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--card-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; line-height: 1.5; }
+ol.chain .step-n { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; background: var(--blue); color: var(--bg); }
